@@ -17,6 +17,36 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
  MCP:  stdio · streamable-http · sse (any server)   ┘                    └── device bridge (ms bridge → remote agents use your PC)
 ```
 
+## Screenshots
+
+**Chat.** One column, one conversation. Every tool call is a card inline with the answer: name, arguments,
+result, duration and the policy decision (green = ran, red = denied/error). Markdown answers, thinking
+blocks collapsed, provider · model stamped under each message. Provider, model, assistant and the tools
+switch live in the header, so you can change them mid-conversation.
+
+![chat](docs/screenshots/chat.png)
+
+**Approvals.** When a tool is `ask`-level (destructive hint, dangerous shell pattern, or your rule) the turn
+pauses and a card appears above the composer: *Allow once · Allow for this chat · Always allow · Deny*.
+The same prompt appears inline in the terminal UI.
+
+![approval](docs/screenshots/approval.png)
+
+**Providers.** Cards on the left, one form on the right. Pick a preset, paste a key (or a local base URL),
+*Test* lists the models, *Discover models* fills the model dropdown. Keys are never sent back to the browser.
+
+![providers](docs/screenshots/providers.png)
+
+**MCP servers.** Status, tool count and transport per server, with restart/disable, plus one-click import
+from the configs you already have in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code or Cherry Studio.
+
+![mcp](docs/screenshots/mcp.png)
+
+**Tools & policy.** Every tool the agent can see, with its server, read-only/destructive flags and a per-tool
+rule (allow / ask / block). Defaults for everything else, plus the workspace folder for local tools.
+
+![tools](docs/screenshots/tools.png)
+
 ## Install (anywhere)
 
 ```bash

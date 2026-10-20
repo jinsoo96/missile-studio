@@ -96,7 +96,7 @@
   // ---------------------------------------------------------------- messages
   function toolCard(call, result) {
     const card = el('div', { class: 'toolcall' + (result ? (result.is_error ? ' error' : ' ok') : '') });
-    card.append(el('span', { class: 'tname' }, '⚙ ' + call.name), result ? el('span', { class: 'dur' }, `${result.duration_ms ?? ''}ms ${result.decision || ''}`) : el('span', { class: 'dur' }, 'running…'));
+    card.append(el('span', { class: 'tname' }, '⚙ ' + call.name), result ? el('span', { class: 'dur' }, `${result.duration_ms != null ? result.duration_ms + 'ms ' : ''}${result.decision || (result.is_error ? 'error' : 'ok')}`) : el('span', { class: 'dur' }, 'running…'));
     const args = JSON.stringify(call.arguments ?? {}, null, 0); card.append(el('pre', {}, args.length > 1200 ? args.slice(0, 1200) + '…' : args));
     if (result) { const txt = result.text || result.content || ''; card.append(el('pre', {}, String(txt).slice(0, 4000))); for (const im of result.images || []) card.append(el('img', { src: `data:${im.mime_type || 'image/png'};base64,${im.data}` })); }
     return card;

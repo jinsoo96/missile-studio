@@ -143,7 +143,10 @@ class LocalTools:
         workdir = self._resolve(cwd) if cwd else self.workspace
         if os.name == "nt":
             exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-            argv = [exe, "-NoProfile", "-NonInteractive", "-Command", command]
+            # Force UTF-8 on both pipes; otherwise non-ASCII output (e.g. localized error text)
+            # arrives in the console code page and decodes as garbage.
+            prelude = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; "
+            argv = [exe, "-NoProfile", "-NonInteractive", "-Command", prelude + command]
         else:
             argv = [os.environ.get("SHELL", "/bin/sh"), "-lc", command]
         env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "MISSILE_WORKSPACE": str(self.workspace)}
