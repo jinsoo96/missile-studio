@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>missile-studio</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+</head>
+<body>
+<div id="login" class="login hidden">
+  <form id="loginForm" class="login-card">
+    <h1>missile-studio</h1>
+    <p>This server requires a token. It was printed by <code>missile serve</code>.</p>
+    <input id="loginToken" type="password" placeholder="token" autocomplete="off">
+    <button type="submit">Enter</button>
+    <div id="loginErr" class="err"></div>
+  </form>
+</div>
+
+<div id="app" class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">🚀</span>
+      <span class="name">missile-studio</span>
+      <span id="version" class="ver"></span>
+    </div>
+    <button id="newChat" class="primary wide">+ New chat</button>
+    <nav id="convList" class="conv-list"></nav>
+    <div class="side-foot">
+      <button data-view="chat" class="nav active">Chat</button>
+      <button data-view="providers" class="nav">Providers</button>
+      <button data-view="mcp" class="nav">MCP</button>
+      <button data-view="tools" class="nav">Tools</button>
+      <button data-view="assistants" class="nav">Assistants</button>
+      <button data-view="agents" class="nav">Agents</button>
+      <button data-view="audit" class="nav">Audit</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- CHAT -->
+    <section id="view-chat" class="view active">
+      <header class="chat-head">
+        <select id="selProvider" title="provider"></select>
+        <select id="selModel" title="model"></select>
+        <button id="btnRefreshModels" class="icon" title="discover models">⟳</button>
+        <select id="selAssistant" title="assistant"></select>
+        <label class="chk"><input type="checkbox" id="chkTools" checked> tools</label>
+        <span class="spacer"></span>
+        <span id="convTitle" class="conv-title"></span>
+        <button id="btnDeleteConv" class="icon" title="delete conversation">🗑</button>
+      </header>
+      <div id="messages" class="messages"></div>
+      <div id="approvals" class="approvals"></div>
+      <div id="attachBar" class="attach-bar"></div>
+      <footer class="composer">
+        <button id="btnAttach" class="icon" title="attach file or image">📎</button>
+        <input id="fileInput" type="file" multiple hidden>
+        <textarea id="input" rows="1" placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="btnStop" class="danger hidden">■ Stop</button>
+        <button id="btnSend" class="primary">Send</button>
+      </footer>
+    </section>
+
+    <!-- PROVIDERS -->
+    <section id="view-providers" class="view">
+      <h2>Providers <small>models you can talk to</small></h2>
+      <div class="two-col">
+        <div>
+          <div id="providerList" class="cards"></div>
+        </div>
+        <form id="providerForm" class="form">
+          <h3 id="providerFormTitle">Add provider</h3>
+          <label>Preset <select id="pPreset"></select></label>
+          <label>Id <input id="pId" required placeholder="openai"></label>
+          <label>Label <input id="pLabel" placeholder="OpenAI"></label>
+          <label>Kind <select id="pKind"><option value="openai">openai-compatible</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option><option value="agentserver">agent server</option></select></label>
+          <label>Base URL <input id="pBase" placeholder="https://api.openai.com/v1"></label>
+          <label>API key <input id="pKey" type="password" placeholder="leave blank to keep / use env"></label>
+          <label>API key env var <input id="pKeyEnv" placeholder="OPENAI_API_KEY"></label>
+          <div id="agentFields" class="hidden">
+            <label>Agent server email <input id="pEmail"></label>
+            <label>Agent server password <input id="pPassword" type="password"></label>
+          </div>
+          <label>Default model <input id="pModel" placeholder="gpt-4.1-mini"></label>
+          <label>Extra body (JSON) <input id="pExtra" placeholder='{"enable_thinking": false}'></label>
+          <label>Headers (JSON) <input id="pHeaders" placeholder='{"X-Title": "missile"}'></label>
+          <div class="row">
+            <button type="button" id="pTest">Test</button>
+            <button type="submit" class="primary">Save</button>
+            <button type="button" id="pCancel">Clear</button>
+          </div>
+          <pre id="pTestOut" class="out"></pre>
+        </form>
+      </div>
+    </section>
+
+    <!-- MCP -->
+    <section id="view-mcp" class="view">
+      <h2>MCP servers <small>local tools, stdio / http / sse</small></h2>
+      <div class="two-col">
+        <div>
+          <div id="mcpList" class="cards"></div>
+          <h3>Import from other apps</h3>
+          <div id="importSources" class="cards small"></div>
+          <details><summary>Paste JSON (mcpServers)</summary>
+            <textarea id="importJson" rows="6" placeholder='{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]}}}'></textarea>
+            <button id="btnImportJson">Import</button>
+          </details>
+          <p class="hint">Export for Claude Desktop / Cursor / Cherry: <a href="/api/mcp/export" target="_blank">/api/mcp/export</a>. Use this studio as ONE MCP server elsewhere: <code>missile hub</code>.</p>
+        </div>
+        <form id="mcpForm" class="form">
+          <h3 id="mcpFormTitle">Add MCP server</h3>
+          <label>Name <input id="mName" required placeholder="filesystem"></label>
+          <label>Transport <select id="mTransport"><option value="stdio">stdio (command)</option><option value="http">streamable http</option><option value="sse">sse</option></select></label>
+          <div id="mStdio">
+            <label>Command <input id="mCommand" placeholder="npx"></label>
+            <label>Args (one per line) <textarea id="mArgs" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;."></textarea></label>
+            <label>Env (KEY=VALUE per line) <textarea id="mEnv" rows="2"></textarea></label>
+            <label>Working dir <input id="mCwd"></label>
+          </div>
+          <div id="mHttp" class="hidden">
+            <label>URL <input id="mUrl" placeholder="http://127.0.0.1:8000/mcp"></label>
+            <label>Headers (KEY=VALUE per line) <textarea id="mHeaders" rows="2"></textarea></label>
+          </div>
+          <label class="chk"><input type="checkbox" id="mEnabled" checked> enabled</label>
+          <div class="row">
+            <button type="submit" class="primary">Save & connect</button>
+            <button type="button" id="mCancel">Clear</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- TOOLS / POLICY -->
+    <section id="view-tools" class="view">
+      <h2>Tools & policy <small>what the agent may run, and when to ask you</small></h2>
+      <div class="row wrap">
+        <label>Default for tools <select id="polDefault"><option>allow</option><option>ask</option><option>block</option></select></label>
+        <label>Default for read-only tools <select id="polRO"><option>allow</option><option>ask</option><option>block</option></select></label>
+        <label>Workspace folder <input id="btWorkspace" placeholder="~/.missile-studio/workspace"></label>
+        <label class="chk"><input type="checkbox" id="btShell"> shell</label>
+        <label class="chk"><input type="checkbox" id="btFs"> filesystem</label>
+        <label class="chk"><input type="checkbox" id="btWeb"> web fetch</label>
+        <button id="btnSavePolicy" class="primary">Save</button>
+      </div>
+      <table id="toolTable" class="table"><thead><tr><th>tool</th><th>server</th><th>flags</th><th>rule</th><th>description</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <!-- ASSISTANTS -->
+    <section id="view-assistants" class="view">
+      <h2>Assistants <small>system prompt + preferred model + tool set</small></h2>
+      <div class="two-col">
+        <div id="assistantList" class="cards"></div>
+        <form id="assistantForm" class="form">
+          <h3>Assistant</h3>
+          <label>Id <input id="aId" required></label>
+          <label>Name <input id="aName" required></label>
+          <label>System prompt <textarea id="aSystem" rows="8"></textarea></label>
+          <label>Provider (optional) <select id="aProvider"><option value="">(default)</option></select></label>
+          <label>Model (optional) <input id="aModel"></label>
+          <label>Tools <input id="aTools" placeholder="all | none | local__*, server__tool"></label>
+          <label>Max iterations <input id="aIter" type="number" value="25"></label>
+          <div class="row"><button type="submit" class="primary">Save</button><button type="button" id="aCancel">Clear</button></div>
+        </form>
+      </div>
+    </section>
+
+    <!-- AGENT SERVER -->
+    <section id="view-agents" class="view">
+      <h2>Agent server <small>talk to remote agents, or lend this machine's tools to them</small></h2>
+      <p class="hint">Add a provider of kind <b>agent server</b> (server URL + email + password) in Providers. Then pick an agent below as the "model", or start the bridge so remote agents can call your local tools and MCP servers through this studio.</p>
+      <div class="row wrap">
+        <label>Agent server <select id="xProvider"></select></label>
+        <button id="xListAgents">List agents</button>
+        <label class="chk"><input type="checkbox" id="xTrust"> trust (run 'ask' tools without approval)</label>
+        <button id="xBridgeStart" class="primary">Start bridge</button>
+        <button id="xBridgeStop">Stop bridge</button>
+      </div>
+      <div id="xBridgeStatus" class="cards small"></div>
+      <div id="xAgents" class="cards"></div>
+    </section>
+
+    <!-- AUDIT -->
+    <section id="view-audit" class="view">
+      <h2>Audit log <small>every tool call, decision and result</small></h2>
+      <button id="btnAuditRefresh">Refresh</button>
+      <table id="auditTable" class="table"><thead><tr><th>time</th><th>tool</th><th>decision</th><th>ms</th><th>args</th><th>result</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

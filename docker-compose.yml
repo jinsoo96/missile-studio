@@ -1,0 +1,26 @@
+services:
+  missile-studio:
+    build: .
+    image: missile-studio:local
+    container_name: missile-studio
+    restart: unless-stopped
+    ports:
+      - "7700:7700"
+    environment:
+      # Set a token so the UI/API is protected when reachable from other machines.
+      MISSILE_TOKEN: ${MISSILE_TOKEN:-}
+      # Optional: let providers read keys from the environment via api_key_env.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    volumes:
+      - missile-data:/data
+      # Mount folders you want local tools / MCP servers to see, e.g.:
+      # - ./workspace:/data/workspace
+    # extra_hosts lets a container reach Ollama/vLLM on the host as http://host.docker.internal:11434/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  missile-data:

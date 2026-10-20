@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "missile-studio"
+version = "0.1.0"
+description = "Your own LLM studio: many model providers, local MCP servers, remote agent servers, one agent loop. Web UI + terminal, installable anywhere, usable over SSH."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "jinsoo96", email = "wlstn010203@gmail.com" }]
+keywords = ["llm", "mcp", "agent", "studio", "openai", "anthropic", "gemini", "ollama", "vllm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mcp>=2.3.0,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "httpx>=0.27,<1",
+    "pydantic>=2.6,<3",
+    "rich>=13.7",
+    "prompt_toolkit>=3.0.43",
+    "python-multipart>=0.0.9",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "build>=1.2"]
+
+[project.scripts]
+missile = "missile_studio.cli:main"
+missile-studio = "missile_studio.cli:main"
+ms = "missile_studio.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jinsoo96/missile-studio"
+Repository = "https://github.com/jinsoo96/missile-studio"
+Issues = "https://github.com/jinsoo96/missile-studio/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/missile_studio"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/missile_studio", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

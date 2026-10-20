@@ -1,0 +1,21 @@
+# systemd unit for Linux servers.
+#   sudo cp scripts/missile-studio.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now missile-studio
+# Adjust User, the missile path (`which missile`) and the token.
+[Unit]
+Description=missile-studio (LLM + MCP + agent studio)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Environment=PYTHONUNBUFFERED=1
+Environment=MISSILE_HOME=/home/%i/.missile-studio
+# Environment=MISSILE_TOKEN=change-me
+ExecStart=/home/%i/.local/bin/missile serve --host 127.0.0.1 --port 7700
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
