@@ -1,7 +1,11 @@
-"""SQLite persistence (stdlib sqlite3, WAL). Conversations, messages, tool audit log."""
+"""SQLite persistence (stdlib sqlite3, WAL).
+
+Tables: conversations, messages, tool_audit, admin_users, api_tokens, events, settings.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
   FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, seq);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 CREATE TABLE IF NOT EXISTS tool_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL NOT NULL,
@@ -44,7 +49,45 @@ CREATE TABLE IF NOT EXISTS tool_audit (
   result_excerpt TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON tool_audit(ts);
+CREATE TABLE IF NOT EXISTS admin_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  must_change_password INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL,
+  last_login_at REAL
+);
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  scopes TEXT NOT NULL DEFAULT 'chat',
+  created_at REAL NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  last_used_at REAL,
+  revoked_at REAL
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL NOT NULL,
+  level TEXT NOT NULL DEFAULT 'info',
+  category TEXT NOT NULL DEFAULT 'system',
+  message TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '{}',
+  actor TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_cat ON events(category);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
 """
+
+
+def sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
 class Store:
@@ -78,9 +121,23 @@ class Store:
         row = self._conn().execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         return dict(row) if row else None
 
-    def list_conversations(self, limit: int = 200) -> list[dict]:
-        rows = self._conn().execute("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+    def list_conversations(self, limit: int = 200, offset: int = 0, q: str = "") -> list[dict]:
+        if q:
+            rows = self._conn().execute(
+                "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) AS message_count FROM conversations c WHERE title LIKE ? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (f"%{q}%", limit, offset),
+            ).fetchall()
+        else:
+            rows = self._conn().execute(
+                "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) AS message_count FROM conversations c ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
         return [dict(r) for r in rows]
+
+    def count_conversations(self, q: str = "") -> int:
+        if q:
+            return self._conn().execute("SELECT COUNT(*) FROM conversations WHERE title LIKE ?", (f"%{q}%",)).fetchone()[0]
+        return self._conn().execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
 
     def update_conversation(self, cid: str, **fields: Any) -> None:
         if not fields:
@@ -138,3 +195,201 @@ class Store:
         else:
             rows = self._conn().execute("SELECT * FROM tool_audit ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- admin users
+    def list_admins(self) -> list[dict]:
+        return [dict(r) for r in self._conn().execute("SELECT id, username, must_change_password, created_at, last_login_at FROM admin_users ORDER BY id").fetchall()]
+
+    def get_admin(self, username: str) -> Optional[dict]:
+        row = self._conn().execute("SELECT * FROM admin_users WHERE username=?", (username,)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_admin(self, username: str, password_hash: str, must_change: bool) -> None:
+        conn = self._conn()
+        if conn.execute("SELECT 1 FROM admin_users WHERE username=?", (username,)).fetchone():
+            conn.execute("UPDATE admin_users SET password_hash=?, must_change_password=? WHERE username=?", (password_hash, int(must_change), username))
+        else:
+            conn.execute("INSERT INTO admin_users(username,password_hash,must_change_password,created_at) VALUES (?,?,?,?)", (username, password_hash, int(must_change), time.time()))
+
+    def touch_admin_login(self, username: str) -> None:
+        self._conn().execute("UPDATE admin_users SET last_login_at=? WHERE username=?", (time.time(), username))
+
+    def delete_admin(self, username: str) -> bool:
+        cur = self._conn().execute("DELETE FROM admin_users WHERE username=?", (username,))
+        return cur.rowcount > 0
+
+    # ---- api tokens
+    def create_token(self, name: str, token_plain: str, scopes: str, created_by: str) -> dict:
+        tid = "tok_" + uuid.uuid4().hex[:12]
+        self._conn().execute(
+            "INSERT INTO api_tokens(id,name,token_hash,scopes,created_at,created_by) VALUES (?,?,?,?,?,?)",
+            (tid, name, sha256(token_plain), scopes, time.time(), created_by),
+        )
+        return self.get_token(tid)  # type: ignore[return-value]
+
+    def get_token(self, tid: str) -> Optional[dict]:
+        row = self._conn().execute("SELECT id,name,scopes,created_at,created_by,last_used_at,revoked_at FROM api_tokens WHERE id=?", (tid,)).fetchone()
+        return dict(row) if row else None
+
+    def list_tokens(self) -> list[dict]:
+        return [dict(r) for r in self._conn().execute("SELECT id,name,scopes,created_at,created_by,last_used_at,revoked_at FROM api_tokens ORDER BY created_at DESC").fetchall()]
+
+    def lookup_token(self, token_plain: str) -> Optional[dict]:
+        row = self._conn().execute("SELECT id,name,scopes,revoked_at FROM api_tokens WHERE token_hash=?", (sha256(token_plain),)).fetchone()
+        if not row or row["revoked_at"]:
+            return None
+        self._conn().execute("UPDATE api_tokens SET last_used_at=? WHERE id=?", (time.time(), row["id"]))
+        return dict(row)
+
+    def revoke_token(self, tid: str) -> bool:
+        cur = self._conn().execute("UPDATE api_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (time.time(), tid))
+        return cur.rowcount > 0
+
+    # ---- events (admin/system log)
+    def event(self, level: str, category: str, message: str, details: Optional[dict] = None, actor: str = "") -> None:
+        try:
+            self._conn().execute(
+                "INSERT INTO events(ts,level,category,message,details,actor) VALUES (?,?,?,?,?,?)",
+                (time.time(), level, category, message, json.dumps(details or {}, ensure_ascii=False, default=str)[:8000], actor),
+            )
+        except Exception:
+            pass
+
+    def list_events(self, category: str = "", level: str = "", before: Optional[int] = None, limit: int = 100) -> list[dict]:
+        sql = "SELECT * FROM events WHERE 1=1"
+        args: list[Any] = []
+        if category:
+            sql += " AND category=?"
+            args.append(category)
+        if level:
+            sql += " AND level=?"
+            args.append(level)
+        if before:
+            sql += " AND id<?"
+            args.append(before)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        out = []
+        for r in self._conn().execute(sql, args).fetchall():
+            d = dict(r)
+            try:
+                d["details"] = json.loads(d["details"])
+            except Exception:
+                pass
+            out.append(d)
+        return out
+
+    # ---- settings kv
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        row = self._conn().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row["value"])
+        except Exception:
+            return default
+
+    def set_setting(self, key: str, value: Any) -> None:
+        self._conn().execute("INSERT INTO settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", (key, json.dumps(value, ensure_ascii=False), time.time()))
+
+    def all_settings(self) -> dict:
+        out = {}
+        for r in self._conn().execute("SELECT key, value FROM settings").fetchall():
+            try:
+                out[r["key"]] = json.loads(r["value"])
+            except Exception:
+                pass
+        return out
+
+    # ---- stats (admin dashboard)
+    def stats(self, since: float) -> dict:
+        c = self._conn()
+        msgs = c.execute("SELECT role, COUNT(*) AS n FROM messages WHERE created_at>=? GROUP BY role", (since,)).fetchall()
+        by_role = {r["role"]: r["n"] for r in msgs}
+        tools = c.execute("SELECT COUNT(*) AS n, SUM(is_error) AS errors, SUM(CASE WHEN decision='deny' THEN 1 ELSE 0 END) AS denied, SUM(CASE WHEN decision='block' THEN 1 ELSE 0 END) AS blocked, AVG(duration_ms) AS avg_ms FROM tool_audit WHERE ts>=?", (since,)).fetchone()
+        convs = c.execute("SELECT COUNT(*) FROM conversations WHERE created_at>=?", (since,)).fetchone()[0]
+        errors = c.execute("SELECT COUNT(*) FROM messages WHERE created_at>=? AND role='assistant' AND content LIKE '%\"error\": true%'", (since,)).fetchone()[0]
+        return {
+            "user_messages": by_role.get("user", 0),
+            "assistant_messages": by_role.get("assistant", 0),
+            "tool_calls": tools["n"] or 0,
+            "tool_errors": tools["errors"] or 0,
+            "tool_denied": tools["denied"] or 0,
+            "tool_blocked": tools["blocked"] or 0,
+            "tool_avg_ms": int(tools["avg_ms"] or 0),
+            "new_conversations": convs,
+            "turn_errors": errors,
+        }
+
+    def hourly(self, hours: int = 24) -> list[dict]:
+        now = time.time()
+        start = now - hours * 3600
+        c = self._conn()
+        buckets = [{"hour": int((start + i * 3600) // 3600 * 3600), "messages": 0, "tool_calls": 0, "errors": 0} for i in range(hours)]
+        for r in c.execute("SELECT created_at FROM messages WHERE created_at>=? AND role='user'", (start,)).fetchall():
+            i = int((r["created_at"] - start) // 3600)
+            if 0 <= i < hours:
+                buckets[i]["messages"] += 1
+        for r in c.execute("SELECT ts, is_error FROM tool_audit WHERE ts>=?", (start,)).fetchall():
+            i = int((r["ts"] - start) // 3600)
+            if 0 <= i < hours:
+                buckets[i]["tool_calls"] += 1
+                buckets[i]["errors"] += int(r["is_error"])
+        return buckets
+
+    def top_tools(self, since: float, limit: int = 10) -> list[dict]:
+        rows = self._conn().execute("SELECT tool, COUNT(*) AS n, SUM(is_error) AS errors FROM tool_audit WHERE ts>=? GROUP BY tool ORDER BY n DESC LIMIT ?", (since, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def usage_by_model(self, since: float, limit: int = 10) -> list[dict]:
+        rows = self._conn().execute("SELECT content FROM messages WHERE created_at>=? AND role='assistant'", (since,)).fetchall()
+        agg: dict[str, dict] = {}
+        for r in rows:
+            try:
+                meta = json.loads(r["content"]).get("meta") or {}
+            except Exception:
+                continue
+            key = f"{meta.get('provider', '?')} / {meta.get('model', '?')}"
+            a = agg.setdefault(key, {"key": key, "turns": 0, "input_tokens": 0, "output_tokens": 0})
+            a["turns"] += 1
+            u = meta.get("usage") or {}
+            a["input_tokens"] += int(u.get("input_tokens", 0) or 0)
+            a["output_tokens"] += int(u.get("output_tokens", 0) or 0)
+        return sorted(agg.values(), key=lambda x: -x["turns"])[:limit]
+
+    def totals(self) -> dict:
+        c = self._conn()
+        return {
+            "conversations": c.execute("SELECT COUNT(*) FROM conversations").fetchone()[0],
+            "messages": c.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
+            "tool_calls": c.execute("SELECT COUNT(*) FROM tool_audit").fetchone()[0],
+            "events": c.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+        }
+
+    # ---- retention
+    def prune(self, conversation_days: int = 0, event_days: int = 365, audit_days: int = 365) -> dict:
+        c = self._conn()
+        now = time.time()
+        out = {"conversations": 0, "events": 0, "audit": 0}
+        if conversation_days and conversation_days > 0:
+            cutoff = now - conversation_days * 86400
+            ids = [r["id"] for r in c.execute("SELECT id FROM conversations WHERE updated_at<?", (cutoff,)).fetchall()]
+            for cid in ids:
+                self.delete_conversation(cid)
+            out["conversations"] = len(ids)
+        if event_days and event_days > 0:
+            out["events"] = c.execute("DELETE FROM events WHERE ts<?", (now - event_days * 86400,)).rowcount
+        if audit_days and audit_days > 0:
+            out["audit"] = c.execute("DELETE FROM tool_audit WHERE ts<?", (now - audit_days * 86400,)).rowcount
+        return out
+
+    def vacuum(self) -> None:
+        self._conn().execute("VACUUM")
+
+    def db_size(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(self.path) + suffix)
+            if p.exists():
+                total += p.stat().st_size
+        return total

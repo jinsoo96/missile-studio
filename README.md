@@ -19,33 +19,36 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
 
 ## Screenshots
 
-**Chat.** One column, one conversation. Every tool call is a card inline with the answer: name, arguments,
-result, duration and the policy decision (green = ran, red = denied/error). Markdown answers, thinking
-blocks collapsed, provider · model stamped under each message. Provider, model, assistant and the tools
-switch live in the header, so you can change them mid-conversation.
+**Chat.** Icon rail, chat list grouped by day, one conversation in the middle. Assistant and model are
+pills in the top bar, so you can switch mid-conversation. Every tool call is a collapsible card inside
+the answer: name, arguments, result, policy decision and duration. Markdown, code blocks with copy,
+thinking blocks, token usage. Light and dark themes.
 
 ![chat](docs/screenshots/chat.png)
 
 **Approvals.** When a tool is `ask`-level (destructive hint, dangerous shell pattern, or your rule) the turn
-pauses and a card appears above the composer: *Allow once · Allow for this chat · Always allow · Deny*.
-The same prompt appears inline in the terminal UI.
+pauses and a card appears in the flow: *Allow once · Allow for this chat · Always allow · Deny*. The same
+prompt appears inline in the terminal UI.
 
 ![approval](docs/screenshots/approval.png)
 
-**Providers.** Cards on the left, one form on the right. Pick a preset, paste a key (or a local base URL),
-*Test* lists the models, *Discover models* fills the model dropdown. Keys are never sent back to the browser.
+**Settings → Model providers.** Three columns like a desktop client: settings nav, provider list with a
+status dot, and the detail with an enable switch, key field (never sent back to the browser), *Test*,
+*Discover models* and the model list as chips (click one to make it the default).
 
 ![providers](docs/screenshots/providers.png)
 
-**MCP servers.** Status, tool count and transport per server, with restart/disable, plus one-click import
-from the configs you already have in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code or Cherry Studio.
+**Settings → MCP servers.** Status, tool count and transport per server, the tools it exposes with
+read-only / destructive flags, restart, and one-click import from Claude Code, Claude Desktop, Cursor,
+Windsurf, VS Code or Cherry Studio.
 
 ![mcp](docs/screenshots/mcp.png)
 
-**Tools & policy.** Every tool the agent can see, with its server, read-only/destructive flags and a per-tool
-rule (allow / ask / block). Defaults for everything else, plus the workspace folder for local tools.
+**Admin console (`/admin`).** A separate, password-protected console: dashboard with warnings and
+24h activity, providers & MCP health with test/restart, access tokens with scopes, typed settings that
+apply immediately, event log, system status, retention. See [docs/GUIDE-admin.md](docs/GUIDE-admin.md).
 
-![tools](docs/screenshots/tools.png)
+![admin](docs/screenshots/admin.png)
 
 ## Install (anywhere)
 
@@ -79,7 +82,7 @@ ms ask --json "summarize README.md with local__read_file"   # scripting
 ```
 
 Short forms: `ms s` (serve) · `ms c` (chat) · `ms a` / `ms q` (ask) · `ms p` (provider) · `ms m` (mcp) ·
-`ms h` (hub) · `ms b` (bridge) · `ms dr` (doctor) · `ls` / `rm` inside `p`, `m` and `assistant`.
+`ms h` (hub) · `ms b` (bridge) · `ms dr` (doctor) · `ms admin` (users, tokens) · `ls` / `rm` inside `p`, `m` and `assistant`.
 
 Config lives in `~/.missile-studio/config.json` (override with `MISSILE_HOME`). Secrets can stay out of
 the file with `--api-key-env OPENAI_API_KEY`.
@@ -96,6 +99,7 @@ the file with `--api-key-env OPENAI_API_KEY`.
 | **Conversations** | SQLite, resumable, attachments (text/code/markdown/pdf*/images), markdown rendering, thinking blocks, tool cards. |
 | **Hub** | `ms hub` exposes *everything* (local tools + all MCP servers) as **one** MCP server over stdio or HTTP. Point Claude Code, Cursor or Claude Desktop at it. |
 | **Agent servers** | Chat with agents hosted on a remote agent platform (login, agent list, SSE stream, server-side tool events). `ms bridge` registers this machine as a device on that platform, so its agents can call your local tools and MCP servers through missile's policy. |
+| **Admin console** | `/admin`: username/password sessions, dashboard (warnings, 24h chart, top tools, model usage), chats browser, access tokens with `chat` / `admin` scopes, typed settings (maintenance mode, policy defaults, retention, token rotation), event log, system status, log tails, retention and vacuum. `ms admin …` manages users and tokens from the shell. |
 | **Remote** | Token auth (auto-generated when bound to a non-loopback address), SSH port-forward friendly, Tailscale / Cloudflare Tunnel recipes, Docker image, systemd unit, Windows scheduled task. |
 
 \* PDF text needs `pip install pypdf`.
@@ -135,7 +139,9 @@ src/missile_studio/
   mcp/importers.py   read other clients' MCP configs
   tools/builtin.py   local sandboxed tools + dangerous-command detector
   engine.py          the agent loop: policy → approvals → execution → persistence → events
-  server/            FastAPI JSON API + SSE chat + static web UI (vanilla JS, no build step)
+  server/app.py      FastAPI JSON API + SSE chat + auth (owner token, scoped tokens, admin sessions)
+  server/admin.py    admin console backend: sessions, typed settings, dashboard, tokens, events, retention
+  server/static/     web UI + admin UI (vanilla JS, no build step)
   tui.py / cli.py    terminal chat, one-shot ask, management commands
   hub.py             everything as one MCP server
   device_bridge.py   device WebSocket client for agent servers

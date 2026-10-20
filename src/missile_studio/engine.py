@@ -307,6 +307,8 @@ class Engine:
                 think_parts: list[str] = []
                 calls: list[dict] = []
                 had_error = False
+                usage: Optional[dict] = None
+                t_iter = time.time()
                 async for ev in provider.stream(model, messages, llm_tools, options):
                     et = ev.get("type")
                     if et == "text_delta":
@@ -323,6 +325,9 @@ class Engine:
                         yield ev
                     elif et == "done":
                         finish = ev.get("finish_reason", "stop")
+                    elif et == "usage":
+                        usage = {"input_tokens": ev.get("input_tokens", 0), "output_tokens": ev.get("output_tokens", 0)}
+                        yield ev
                     else:
                         yield ev
                 assistant_msg: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
@@ -330,7 +335,11 @@ class Engine:
                     assistant_msg["thinking"] = "".join(think_parts)
                 if calls:
                     assistant_msg["tool_calls"] = [{"id": c["id"], "name": c["name"], "arguments": c.get("arguments") or {}} for c in calls]
-                assistant_msg["meta"] = {"provider": pid, "model": model}
+                assistant_msg["meta"] = {"provider": pid, "model": model, "duration_ms": int((time.time() - t_iter) * 1000)}
+                if usage:
+                    assistant_msg["meta"]["usage"] = usage
+                if had_error:
+                    assistant_msg["meta"]["error"] = True
                 if assistant_msg["content"] or calls or think_parts:
                     self.store.append_message(req.conversation_id, assistant_msg)
                     yield {"type": "message", "message": assistant_msg}
@@ -372,7 +381,7 @@ class Engine:
                     text = str(result.get("text", ""))
                     if len(text) > 60000:
                         text = text[:50000] + f"\n... [truncated {len(text) - 50000} chars]"
-                    tool_msg = {"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": text, "is_error": bool(result.get("is_error"))}
+                    tool_msg = {"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": text, "is_error": bool(result.get("is_error")), "decision": decision, "duration_ms": dur}
                     images = [p for p in result.get("content", []) if p.get("type") == "image"]
                     if images:
                         tool_msg["images"] = images[:4]
@@ -398,7 +407,7 @@ class Engine:
 
 
 def _strip(m: dict) -> dict:
-    """Message as sent to providers (drop ids/meta/images that providers do not accept)."""
+    """Message as sent to providers (drop ids/meta/decision/images that providers do not accept)."""
     keep = {"role", "content", "tool_calls", "tool_call_id", "name", "is_error"}
     out = {k: v for k, v in m.items() if k in keep}
     if out.get("role") == "tool" and not isinstance(out.get("content"), str):

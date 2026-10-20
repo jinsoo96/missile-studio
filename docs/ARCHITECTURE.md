@@ -72,6 +72,21 @@ command list (`rm -rf`, `Remove-Item -Recurse`, `format`, `dd`, `git push --forc
 Provider secrets may be referenced by env var name (`api_key_env`). The UI never receives raw keys
 (masked); sending the masked placeholder back keeps the stored secret.
 
+## Auth and the admin console
+
+Three principals: the **owner token** (`server.token`, admin), **API tokens** from the admin console
+(scope `chat` or `admin`, SHA-256 stored, revocable, last-used tracked) and **admin sessions**
+(username + PBKDF2 password, HS256 cookie, 12 h, CSRF header on mutations, login rate limit per IP).
+A loopback bind without a token trusts the local user as admin. Settings-changing routes need the
+admin role; chat routes need any principal; maintenance mode turns chat off for non-admins.
+
+The admin console (`server/admin.py`, `static/admin.*`) adds a typed settings registry (kind, group,
+choices, min/max; keys backed either by `config.json` or by the `settings` table), dashboard stats
+computed from `messages` / `tool_audit`, warnings as codes the UI turns into fix-it links, an `events`
+table every admin action writes to (secrets redacted), system info, log tails and a 6-hourly retention
+loop. Static assets are served with `Cache-Control: no-cache` and versioned query strings so UI updates
+land without a hard reload.
+
 ## Security posture
 
 - Non-loopback bind requires a token (auto-generated).

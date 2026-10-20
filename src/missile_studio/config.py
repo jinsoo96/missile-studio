@@ -110,6 +110,7 @@ class ToolPolicy(BaseModel):
 class AssistantConfig(BaseModel):
     id: str
     name: str
+    emoji: str = "🤖"
     system_prompt: str = ""
     provider: str = ""
     model: str = ""

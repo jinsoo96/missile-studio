@@ -473,6 +473,49 @@ def cmd_doctor(args) -> int:
     return asyncio.run(run())
 
 
+def cmd_admin(args) -> int:
+    import secrets as _secrets
+
+    from .server.admin import hash_password
+    from .store import Store
+
+    store = Store()
+    sub = args.admin_cmd
+    if sub == "list":
+        rows = store.list_admins()
+        if not rows:
+            _p("no admin users yet (one is created on first `ms serve`)")
+        for u in rows:
+            _p(f"{u['username']:<16} created={u['created_at']:.0f} last_login={u['last_login_at'] or '-'} {'(generated password, must change)' if u['must_change_password'] else ''}")
+        return 0
+    if sub in ("reset-password", "add"):
+        pw = args.password or _secrets.token_urlsafe(12)
+        store.upsert_admin(args.username, hash_password(pw), must_change=not args.password)
+        store.event("info", "auth", f"admin password {'set' if args.password else 'reset'} from CLI", {"username": args.username}, actor="cli")
+        _p(f"user: {args.username}")
+        if not args.password:
+            _p(f"password: {pw}")
+            _p("sign in at /admin and change it.")
+        return 0
+    if sub == "remove":
+        ok = store.delete_admin(args.username)
+        _p("removed" if ok else "no such user")
+        return 0 if ok else 1
+    if sub == "tokens":
+        for t in store.list_tokens():
+            _p(f"{t['id']:<18} {t['name']:<20} {t['scopes']:<6} {'revoked' if t['revoked_at'] else 'active'}")
+        return 0
+    if sub == "token":
+        plain = "msl_" + _secrets.token_urlsafe(24)
+        t = store.create_token(args.name, plain, "admin" if args.admin else "chat", "cli")
+        _p(f"{t['id']} ({t['scopes']}): {plain}")
+        return 0
+    if sub == "revoke":
+        _p("revoked" if store.revoke_token(args.id) else "no such token")
+        return 0
+    return 2
+
+
 def cmd_config(args) -> int:
     if args.config_cmd == "path":
         _p(str(config_path()))
@@ -636,6 +679,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sp.add_parser("doctor", aliases=["dr", "check"], help="check providers, MCP servers and config")
     d.set_defaults(fn=cmd_doctor)
+
+    ad = sp.add_parser("admin", help="admin console users and API tokens")
+    ads = ad.add_subparsers(dest="admin_cmd")
+    ads.add_parser("list")
+    arp = ads.add_parser("reset-password", help="set a new (or generated) password for an admin user")
+    arp.add_argument("username", nargs="?", default="admin")
+    arp.add_argument("--password")
+    aad = ads.add_parser("add")
+    aad.add_argument("username")
+    aad.add_argument("--password")
+    arm2 = ads.add_parser("remove")
+    arm2.add_argument("username")
+    ads.add_parser("tokens")
+    atk = ads.add_parser("token", help="create an API token")
+    atk.add_argument("name")
+    atk.add_argument("--admin", action="store_true", help="admin scope instead of chat")
+    arv = ads.add_parser("revoke")
+    arv.add_argument("id")
+    ad.set_defaults(fn=cmd_admin)
 
     cf = sp.add_parser("config", aliases=["cfg"], help="config file helpers")
     cfs = cf.add_subparsers(dest="config_cmd")
