@@ -72,6 +72,17 @@ command list (`rm -rf`, `Remove-Item -Recurse`, `format`, `dd`, `git push --forc
 Provider secrets may be referenced by env var name (`api_key_env`). The UI never receives raw keys
 (masked); sending the masked placeholder back keeps the stored secret.
 
+## Concurrent turns, split panes, workspace drawer
+
+The server already runs one task per conversation turn (`turn_tasks`), so any number of chats can
+stream at once; `/api/conversations` reports `running` per chat. The web UI keeps one live stream
+object per conversation (`S.live[convId]`) that owns its DOM nodes, so switching chats or re-rendering
+never interrupts a stream, and a pane re-attaches the live node when it shows that conversation again.
+Panes are independent (own conversation, model, assistant, tools switch); *link inputs* fans one
+message out to every pane. The workspace drawer talks to `/api/workspace/*` (tree, read, write,
+delete, run), all resolved through the same sandbox as the local tools; writes and commands need the
+admin role and are recorded (events / tool audit as `workspace__run`, decision `human`).
+
 ## Auth and the admin console
 
 Three principals: the **owner token** (`server.token`, admin), **API tokens** from the admin console

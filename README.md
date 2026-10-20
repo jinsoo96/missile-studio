@@ -44,6 +44,20 @@ Windsurf, VS Code or Cherry Studio.
 
 ![mcp](docs/screenshots/mcp.png)
 
+**Split view · run chats side by side.** Up to three panes, each with its own conversation and model.
+Streams run concurrently; the chat list shows a pulsing dot on anything still answering, and switching
+chats never interrupts a running turn. *Link inputs* sends one message to every pane, so you can compare
+models on the same prompt.
+
+![split](docs/screenshots/split.png)
+
+**Workspace drawer · files, editor, terminal.** The folder your local tools work in, as an IDE-style
+drawer: browse the tree (it refreshes after the agent writes), open and edit files (`Ctrl/⌘ S` saves),
+ask the active chat about the open file, and run commands in the server-side shell. Writes and commands
+need the admin role and land in the audit log.
+
+![workspace](docs/screenshots/workspace.png)
+
 **Admin console (`/admin`).** A separate, password-protected console: dashboard with warnings and
 24h activity, providers & MCP health with test/restart, access tokens with scopes, typed settings that
 apply immediately, event log, system status, retention. See [docs/GUIDE-admin.md](docs/GUIDE-admin.md).
@@ -96,7 +110,8 @@ the file with `--api-key-env OPENAI_API_KEY`.
 | **Local tools** | `local__run_shell`, `read_file`, `write_file`, `list_dir`, `search_files`, `fetch_url`, `now`. Sandboxed to a workspace folder (symlink-safe). |
 | **Policy & approvals** | Per-tool `allow / ask / block` (globs like `fs__*`), read-only tools allowed by default, destructive hints and dangerous shell commands (`rm -rf`, `git push --force`, `curl | sh` ...) always ask. Approve once / for this chat / always, in the browser or in the terminal. Every call lands in an **audit log**. |
 | **Assistants** | System prompt + preferred provider/model + tool set + iteration cap. |
-| **Conversations** | SQLite, resumable, attachments (text/code/markdown/pdf*/images), markdown rendering, thinking blocks, tool cards. |
+| **Conversations** | SQLite, resumable, attachments (text/code/markdown/pdf*/images), markdown rendering, thinking blocks, tool cards. Many chats can run at once; split the view into up to three panes and link their inputs to compare models. |
+| **Workspace** | IDE-style drawer over the local-tools folder: file tree, editor with save, terminal (server-side shell, admin only, audited). |
 | **Hub** | `ms hub` exposes *everything* (local tools + all MCP servers) as **one** MCP server over stdio or HTTP. Point Claude Code, Cursor or Claude Desktop at it. |
 | **Agent servers** | Chat with agents hosted on a remote agent platform (login, agent list, SSE stream, server-side tool events). `ms bridge` registers this machine as a device on that platform, so its agents can call your local tools and MCP servers through missile's policy. |
 | **Admin console** | `/admin`: username/password sessions, dashboard (warnings, 24h chart, top tools, model usage), chats browser, access tokens with `chat` / `admin` scopes, typed settings (maintenance mode, policy defaults, retention, token rotation), event log, system status, log tails, retention and vacuum. `ms admin …` manages users and tokens from the shell. |

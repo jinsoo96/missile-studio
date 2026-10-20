@@ -394,7 +394,10 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     # ------------------------------------------------------------ conversations
     @app.get("/api/conversations", dependencies=[user_dep])
     async def conversations():
-        return store.list_conversations()
+        rows = store.list_conversations()
+        for r in rows:
+            r["running"] = r["id"] in app.state.turn_tasks
+        return rows
 
     @app.post("/api/conversations", dependencies=[user_dep])
     async def create_conversation(body: ConvIn):
@@ -566,6 +569,98 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         if b:
             await b.stop()
         return {"ok": True}
+
+    # ------------------------------------------------------------ workspace (IDE drawer)
+    SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache"}
+
+    def _ws_resolve(rel: str) -> Path:
+        try:
+            return engine.local._resolve(rel or ".")
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+
+    @app.get("/api/workspace/tree", dependencies=[user_dep])
+    async def ws_tree(path: str = "."):
+        root = _ws_resolve(path)
+        if not root.exists():
+            raise HTTPException(404, "no such folder")
+        if not root.is_dir():
+            raise HTTPException(400, "not a folder")
+        entries = []
+        try:
+            for e in sorted(root.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                if e.name in SKIP_DIRS:
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue
+                entries.append({"name": e.name, "dir": e.is_dir(), "size": 0 if e.is_dir() else st.st_size, "mtime": st.st_mtime, "path": str(e.relative_to(engine.local.workspace)).replace("\\", "/")})
+                if len(entries) >= 2000:
+                    break
+        except OSError as e:
+            raise HTTPException(400, str(e))
+        return {"root": str(engine.local.workspace), "path": str(root.relative_to(engine.local.workspace)).replace("\\", "/") if root != engine.local.workspace else ".", "entries": entries}
+
+    @app.get("/api/workspace/file", dependencies=[user_dep])
+    async def ws_read(path: str):
+        p = _ws_resolve(path)
+        if not p.is_file():
+            raise HTTPException(404, "no such file")
+        size = p.stat().st_size
+        if size > 2 * 1024 * 1024:
+            raise HTTPException(413, "file larger than 2MB")
+        data = p.read_bytes()
+        if b"\x00" in data[:8000]:
+            raise HTTPException(415, "binary file")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("cp949", "replace")
+        return {"path": path, "content": text, "size": size, "mtime": p.stat().st_mtime}
+
+    class WsFileIn(BaseModel):
+        path: str
+        content: str
+
+    @app.put("/api/workspace/file", dependencies=[admin_dep])
+    async def ws_write(body: WsFileIn, request: Request):
+        p = _ws_resolve(body.path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(body.content)
+        store.event("info", "data", "workspace file saved", {"path": body.path, "bytes": len(body.content)}, actor=principal_of(request)["actor"])
+        return {"ok": True, "path": body.path, "size": p.stat().st_size, "mtime": p.stat().st_mtime}
+
+    @app.delete("/api/workspace/file", dependencies=[admin_dep])
+    async def ws_delete(path: str, request: Request):
+        p = _ws_resolve(path)
+        if p == engine.local.workspace:
+            raise HTTPException(400, "cannot delete the workspace root")
+        if p.is_dir():
+            import shutil
+
+            shutil.rmtree(p)
+        elif p.exists():
+            p.unlink()
+        else:
+            raise HTTPException(404, "no such path")
+        store.event("info", "data", "workspace path deleted", {"path": path}, actor=principal_of(request)["actor"])
+        return {"ok": True}
+
+    class WsRunIn(BaseModel):
+        command: str
+        cwd: str = ""
+        timeout_seconds: int = 120
+
+    @app.post("/api/workspace/run", dependencies=[admin_dep])
+    async def ws_run(body: WsRunIn, request: Request):
+        if not engine.cfg.builtin_tools.shell:
+            raise HTTPException(400, "the local shell tool is disabled in settings")
+        t0 = time.time()
+        out = await engine.local.run_shell(body.command, timeout_seconds=max(1, min(body.timeout_seconds, 600)), cwd=body.cwd)
+        store.audit(conversation_id="workspace", tool="workspace__run", arguments={"command": body.command, "cwd": body.cwd}, decision="human", is_error=not out.rstrip().endswith("[exit 0]"), duration_ms=int((time.time() - t0) * 1000), result_excerpt=out[:2000])
+        return {"output": out, "duration_ms": int((time.time() - t0) * 1000)}
 
     # ------------------------------------------------------------ admin console
     app.include_router(adminmod.create_admin_router(engine, store, app.state, principal_of))

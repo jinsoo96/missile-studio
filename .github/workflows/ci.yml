@@ -26,6 +26,8 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # the release step uploads wheels on tag pushes
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
