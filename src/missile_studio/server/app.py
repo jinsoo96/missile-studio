@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import __version__
-from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerConfig, ProviderConfig, ToolPolicy, config_path, ensure_token, home_dir
+from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerConfig, ModelPreset, ProviderConfig, StyleConfig, ToolPolicy, config_path, ensure_token, home_dir
 from ..device_bridge import DeviceBridge
 from ..engine import Engine, TurnRequest
 from ..mcp.importers import export_standard, import_from, known_sources, parse_servers
@@ -89,6 +89,13 @@ class ChatIn(BaseModel):
     attachments: list[dict] = []
     tools: Any = None
     allow_dangerous: bool = False
+    thinking: str = ""  # "" | off | on | max
+    style_id: str = ""
+    branch_from: str = ""  # id of the user message being edited: the new message becomes its sibling
+
+
+class HeadIn(BaseModel):
+    message_id: str
 
 
 class DecisionIn(BaseModel):
@@ -212,7 +219,32 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "approvals": [a.as_dict() for a in engine.approvals.pending.values()],
             "bridges": [b.as_dict() for b in app.state.bridges.values()],
             "maintenance": bool(store.get_setting("maintenance_mode", False)),
+            "model_presets": [p.model_dump() for p in cfg.effective_presets()],
+            "presets_configured": bool(cfg.presets),
+            "styles": [st.model_dump() for st in cfg.styles],
         }
+
+    @app.put("/api/presets", dependencies=[admin_dep])
+    async def put_presets(body: list[ModelPreset]):
+        engine.cfg.presets = body
+        engine.save()
+        return [p.model_dump() for p in engine.cfg.effective_presets()]
+
+    @app.post("/api/styles", dependencies=[admin_dep])
+    async def upsert_style(body: StyleConfig):
+        cfg = engine.cfg
+        if cfg.style(body.id):
+            cfg.styles = [body if x.id == body.id else x for x in cfg.styles]
+        else:
+            cfg.styles.append(body)
+        engine.save()
+        return [st.model_dump() for st in cfg.styles]
+
+    @app.delete("/api/styles/{sid}", dependencies=[admin_dep])
+    async def delete_style(sid: str):
+        engine.cfg.styles = [x for x in engine.cfg.styles if x.id != sid]
+        engine.save()
+        return {"ok": True}
 
     # ------------------------------------------------------------ providers
     @app.get("/api/providers", dependencies=[user_dep])
@@ -409,13 +441,25 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         if not conv:
             raise HTTPException(404, "not found")
         conv["messages"] = store.get_messages(cid)
+        conv["branches"] = store.branch_info(cid, conv["messages"])
         return conv
 
     @app.patch("/api/conversations/{cid}", dependencies=[user_dep])
     async def patch_conversation(cid: str, body: dict):
-        allowed = {k: v for k, v in body.items() if k in ("title", "assistant_id", "provider_id", "model")}
+        allowed = {k: v for k, v in body.items() if k in ("title", "assistant_id", "provider_id", "model", "style_id")}
         store.update_conversation(cid, **allowed)
         return store.get_conversation(cid)
+
+    @app.post("/api/conversations/{cid}/head", dependencies=[user_dep])
+    async def switch_branch(cid: str, body: HeadIn):
+        """Make a sibling the visible branch: the head moves to the deepest message under it."""
+        if not store.get_conversation(cid):
+            raise HTTPException(404, "not found")
+        store.set_head(cid, store.leaf_of(cid, body.message_id))
+        conv = store.get_conversation(cid)
+        conv["messages"] = store.get_messages(cid)
+        conv["branches"] = store.branch_info(cid, conv["messages"])
+        return conv
 
     @app.delete("/api/conversations/{cid}", dependencies=[user_dep])
     async def delete_conversation(cid: str):
@@ -430,6 +474,11 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             raise HTTPException(503, "maintenance mode: chat is paused by the administrator")
         if body.conversation_id in app.state.turn_tasks:
             raise HTTPException(409, "a turn is already running for this conversation")
+        if body.branch_from:
+            # editing an earlier message: rewind the head to its parent, the new message becomes a sibling
+            store.set_head(body.conversation_id, store.parent_of(body.conversation_id, body.branch_from))
+        if body.style_id:
+            store.update_conversation(body.conversation_id, style_id=body.style_id)
         req = TurnRequest(
             conversation_id=body.conversation_id,
             user_text=body.text,
@@ -439,6 +488,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             assistant_id=body.assistant_id,
             tools_override=body.tools,
             allow_dangerous=body.allow_dangerous and p["role"] == "admin",
+            thinking=body.thinking,
+            style_id=body.style_id,
         )
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -571,7 +622,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return {"ok": True}
 
     # ------------------------------------------------------------ workspace (IDE drawer)
-    SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache"}
+    SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache", ".history"}
 
     def _ws_resolve(rel: str) -> Path:
         try:
@@ -623,14 +674,57 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         path: str
         content: str
 
+    def _history_dir() -> Path:
+        d = engine.local.workspace / ".history"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _history_key(rel: str) -> str:
+        return rel.replace("\\", "/").strip("/").replace("/", "__")
+
     @app.put("/api/workspace/file", dependencies=[admin_dep])
     async def ws_write(body: WsFileIn, request: Request):
         p = _ws_resolve(body.path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        versioned = False
+        if p.exists() and p.is_file():
+            try:
+                old = p.read_bytes()
+                if old != body.content.encode("utf-8"):
+                    key = _history_key(body.path)
+                    (_history_dir() / f"{key}.{int(time.time() * 1000)}.bak").write_bytes(old)
+                    versioned = True
+                    for b in sorted(_history_dir().glob(f"{key}.*.bak"))[:-20]:
+                        b.unlink(missing_ok=True)
+            except OSError:
+                pass
         with p.open("w", encoding="utf-8", newline="\n") as f:
             f.write(body.content)
-        store.event("info", "data", "workspace file saved", {"path": body.path, "bytes": len(body.content)}, actor=principal_of(request)["actor"])
-        return {"ok": True, "path": body.path, "size": p.stat().st_size, "mtime": p.stat().st_mtime}
+        store.event("info", "data", "workspace file saved", {"path": body.path, "bytes": len(body.content), "versioned": versioned}, actor=principal_of(request)["actor"])
+        return {"ok": True, "path": body.path, "size": p.stat().st_size, "mtime": p.stat().st_mtime, "versioned": versioned}
+
+    @app.get("/api/workspace/history", dependencies=[user_dep])
+    async def ws_history(path: str):
+        key = _history_key(path)
+        out = []
+        for b in sorted(_history_dir().glob(f"{key}.*.bak"), reverse=True):
+            try:
+                ts = int(b.name[len(key) + 1 : -4]) / 1000
+            except ValueError:
+                ts = b.stat().st_mtime
+            out.append({"name": b.name, "ts": ts, "size": b.stat().st_size})
+        return {"path": path, "versions": out}
+
+    @app.get("/api/workspace/history/file", dependencies=[user_dep])
+    async def ws_history_file(name: str):
+        b = (_history_dir() / name).resolve()
+        if b.parent != _history_dir().resolve() or not b.exists():
+            raise HTTPException(404, "no such version")
+        data = b.read_bytes()
+        try:
+            return {"name": name, "content": data.decode("utf-8")}
+        except UnicodeDecodeError:
+            return {"name": name, "content": data.decode("cp949", "replace")}
 
     @app.delete("/api/workspace/file", dependencies=[admin_dep])
     async def ws_delete(path: str, request: Request):

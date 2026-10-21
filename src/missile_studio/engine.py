@@ -96,6 +96,29 @@ class TurnRequest:
     assistant_id: str = ""
     tools_override: Any = None  # None = assistant decides; "none" | list[str]
     allow_dangerous: bool = False
+    thinking: str = ""  # "" | off | on | max
+    style_id: str = ""
+
+
+def thinking_body(pcfg, model: str, level: str) -> dict:
+    """Provider-specific request additions for a thinking level ("" = leave the provider default)."""
+    if not level:
+        return {}
+    on = level != "off"
+    m = (model or "").lower()
+    if pcfg.kind == "anthropic":
+        return {"thinking": {"type": "enabled", "budget_tokens": 16000 if level == "max" else 6000}} if on else {}
+    if pcfg.kind == "gemini":
+        return {"generationConfig": {"thinkingConfig": {"thinkingBudget": -1 if on else 0}}}
+    if pcfg.kind == "openai":
+        base = (pcfg.base_url or "").lower()
+        if "dashscope" in base:
+            return {"enable_thinking": on}
+        if any(m.startswith(p) for p in ("o1", "o3", "o4", "gpt-5")):
+            return {"reasoning_effort": "high" if level == "max" else ("medium" if on else "low")}
+        if any(k in m for k in ("qwen", "glm", "deepseek", "minimax", "kimi")):
+            return {"chat_template_kwargs": {"enable_thinking": on}}
+    return {}
 
 
 class Engine:
@@ -290,6 +313,9 @@ class Engine:
             self.store.update_conversation(req.conversation_id, title=req.user_text.strip().splitlines()[0][:60] if req.user_text.strip() else "New chat")
 
         system = self._system_prompt(assistant, tools)
+        style = self.cfg.style(req.style_id or conv.get("style_id") or "")
+        if style and style.prompt:
+            system += "\n\nWriting style: " + style.prompt
         messages: list[dict] = [{"role": "system", "content": system}] + [_strip(m) for m in history] + [user_msg]
         options = GenerationOptions(
             temperature=assistant.temperature if assistant else None,
@@ -298,6 +324,13 @@ class Engine:
         )
         if pcfg and pcfg.kind == "openai" and ":11434" in (pcfg.base_url or "") and not options.max_tokens:
             options.max_tokens = 8192  # Ollama otherwise caps output at num_predict=128
+        if pcfg and req.thinking:
+            extra = thinking_body(pcfg, model, req.thinking)
+            options.extra_body.update(extra)
+            if pcfg.kind == "anthropic" and "thinking" in extra:
+                budget = extra["thinking"]["budget_tokens"]
+                options.max_tokens = max(options.max_tokens or 0, budget + 4000)
+                options.temperature = None  # the API requires the default temperature with thinking on
         max_iter = assistant.max_iterations if assistant else 25
         finish = "stop"
         iterations = 0

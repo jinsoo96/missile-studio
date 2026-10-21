@@ -118,7 +118,10 @@ class GeminiProvider(BaseProvider):
         if gen:
             body["generationConfig"] = gen
         for k, v in {**self.cfg.extra_body, **options.extra_body}.items():
-            body[k] = v
+            if k == "generationConfig" and isinstance(v, dict):
+                body.setdefault("generationConfig", {}).update(v)
+            else:
+                body[k] = v
 
         url = f"{self._base()}/v1beta/models/{model}:streamGenerateContent?alt=sse"
         emitted_calls = False

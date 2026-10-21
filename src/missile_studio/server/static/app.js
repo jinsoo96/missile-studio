@@ -1,4 +1,4 @@
-/* missile-studio web UI v3: icon rail + list pane + split chat panes + workspace drawer. Vanilla JS, no build. */
+/* missile-studio web UI v4: rail + list pane + split chat panes + workspace/artifacts drawer. Vanilla JS, no build. */
 (() => {
   'use strict';
   const $ = (s, r = document) => r.querySelector(s);
@@ -20,6 +20,9 @@
   const avatarStyle = (s) => `background: hsl(${hue(s)} 55% 48%)`;
   const shortModel = (m) => (m || '').includes('|') ? m.split('|')[1] : m || '';
   const MAX_PANES = 3;
+  const THINK_LABEL = { '': 'provider default', on: 'thinking on', max: 'thinking max', off: 'thinking off' };
+  const EXT = { html: 'html', svg: 'svg', markdown: 'md', md: 'md', json: 'json', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', python: 'py', py: 'py', bash: 'sh', sh: 'sh', powershell: 'ps1', css: 'css', yaml: 'yml', yml: 'yml', sql: 'sql', go: 'go', rust: 'rs', java: 'java', csharp: 'cs', cpp: 'cpp', c: 'c', xml: 'xml', toml: 'toml', mermaid: 'mmd' };
+  const PREVIEWABLE = ['html', 'svg', 'markdown', 'md', 'json'];
 
   // ---------------------------------------------------------------- toast / modal / menu
   let toastTimer;
@@ -36,26 +39,31 @@
     return { close, root: m };
   }
   const confirmDialog = (text, okLabel = 'Delete') => new Promise((res) => { const m = modal({ title: 'Are you sure?', body: el('p', { style: 'margin:0' }, text), footer: [el('button', { class: 'btn', onclick: () => { m.close(); res(false); } }, 'Cancel'), el('button', { class: 'btn danger', onclick: () => { m.close(); res(true); } }, okLabel)] }); });
-  function menu(anchor, items, { searchable = false, onPick } = {}) {
+  const promptDialog = (title, value, help) => new Promise((res) => { const inp = el('input', { class: 'input', value }); const m = modal({ title, body: [inp, help ? el('div', { class: 'muted tiny' }, help) : null], footer: [el('button', { class: 'btn', onclick: () => { m.close(); res(null); } }, 'Cancel'), el('button', { class: 'btn primary', onclick: () => { m.close(); res(inp.value.trim()); } }, 'OK')] }); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { m.close(); res(inp.value.trim()); } }); setTimeout(() => inp.focus(), 0); });
+  function menu(anchor, items, { searchable = false, onPick, filter = '' } = {}) {
     $('.menu')?.remove();
     const r = anchor.getBoundingClientRect();
     const m = el('div', { class: 'menu', style: `left:${Math.min(r.left, window.innerWidth - 440)}px; top:${r.bottom + 6}px` });
     let list;
+    const visible = (it, ql) => !it.group && (!ql || (it.label + ' ' + (it.sub || '')).toLowerCase().includes(ql));
+    // label hits rank above description hits, so "/th" offers /think before "new chat in this pane"
+    const ranked = (ql) => ql ? items.filter((it) => visible(it, ql)).sort((a, b) => (a.label.toLowerCase().includes(ql) ? 0 : 1) - (b.label.toLowerCase().includes(ql) ? 0 : 1)) : items;
     const render = (q = '') => {
       list.innerHTML = ''; const ql = q.toLowerCase();
-      for (const it of items) {
+      for (const it of ranked(ql)) {
         if (it.group) { if (!q) list.append(el('div', { class: 'mgroup' }, it.group)); continue; }
-        if (ql && !(it.label + ' ' + (it.sub || '')).toLowerCase().includes(ql)) continue;
         list.append(el('div', { class: 'mitem' + (it.selected ? ' sel' : ''), onclick: () => { m.remove(); onPick(it); } }, it.icon ? I(it.icon, 'sm') : null, el('span', { class: 'truncate' }, it.label), it.sub ? el('span', { class: 'sub' }, it.sub) : null, it.selected ? I('check', 'sm') : null));
       }
       if (!list.children.length) list.append(el('div', { class: 'mitem muted' }, 'no matches'));
     };
     if (searchable) { const inp = el('input', { class: 'input', placeholder: 'Search…', oninput: () => render(inp.value) }); m.append(el('div', { class: 'msearch' }, inp)); setTimeout(() => inp.focus(), 0); }
-    list = el('div'); m.append(list); render();
+    list = el('div'); m.append(list); render(filter);
     document.body.append(m);
     const off = (e) => { if (!m.contains(e.target) && e.target !== anchor) { m.remove(); document.removeEventListener('mousedown', off); } };
     setTimeout(() => document.addEventListener('mousedown', off), 0);
     if (m.getBoundingClientRect().bottom > window.innerHeight) m.style.top = Math.max(8, r.top - m.offsetHeight - 6) + 'px';
+    let cur = filter;
+    return { el: m, rerender: (q) => { cur = q; render(q); }, pickFirst: () => { const it = ranked(cur.toLowerCase()).find((x) => !x.group); if (it) { m.remove(); onPick(it); } } };
   }
   const switchEl = (checked, onchange) => { const b = el('button', { class: 'switch', role: 'switch', 'aria-checked': String(!!checked), onclick: () => { const v = b.getAttribute('aria-checked') !== 'true'; b.setAttribute('aria-checked', String(v)); onchange(v); } }); return b; };
   const field = (label, control, help) => el('div', { class: 'field' }, el('label', {}, label), control, help ? el('div', { class: 'help' }, help) : null);
@@ -63,9 +71,9 @@
   // ---------------------------------------------------------------- auth / api
   let token = localStorage.getItem('missile_token') || new URLSearchParams(location.search).get('token') || '';
   if (new URLSearchParams(location.search).get('token')) { localStorage.setItem('missile_token', token); history.replaceState({}, '', location.pathname); }
-  const headers = () => token ? { Authorization: 'Bearer ' + token } : {};
+  const headers = () => ({ 'X-Requested-With': 'missile-admin', ...(token ? { Authorization: 'Bearer ' + token } : {}) });
   async function api(path, opts = {}) {
-    const o = { ...opts, headers: { 'X-Requested-With': 'missile-admin', ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...headers(), ...(opts.headers || {}) } };
+    const o = { ...opts, headers: { ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...headers(), ...(opts.headers || {}) } };
     if (o.body && typeof o.body !== 'string' && !(o.body instanceof FormData)) o.body = JSON.stringify(o.body);
     const r = await fetch(path, o);
     if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
@@ -77,23 +85,34 @@
   $('#loginForm').addEventListener('submit', async (e) => { e.preventDefault(); token = $('#loginToken').value.trim(); try { await api('/api/login', { method: 'POST', body: { token } }); localStorage.setItem('missile_token', token); $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); await boot(); } catch { $('#loginErr').textContent = 'That token was not accepted.'; } });
 
   // ---------------------------------------------------------------- state
-  const newPane = () => ({ id: Math.random().toString(36).slice(2, 8), convId: null, conv: null, messages: [], sel: {}, attachments: [], draft: '' });
-  const S = { st: null, convs: [], view: 'chat', settingsPage: 'providers', sel: {}, search: '', panes: [newPane()], active: 0, live: {}, linkInputs: false,
-    drawer: { open: false, tab: 'files', path: '.', entries: [], file: null, term: [], loading: false } };
-  const theme = { get: () => document.documentElement.getAttribute('data-theme') || '', toggle() { const cur = this.get() || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); const next = cur === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', next); try { localStorage.setItem('missile_theme', next); } catch {} render(); } };
+  const newPane = () => ({ id: Math.random().toString(36).slice(2, 8), convId: null, conv: null, messages: [], branches: {}, sel: {}, attachments: [], draft: '', editing: null, pendingEdit: null });
+  const S = { st: null, convs: [], view: 'chat', settingsPage: 'providers', sel: {}, search: '', panes: [newPane()], active: 0, live: {}, linkInputs: false, artifacts: {},
+    drawer: { open: false, tab: 'files', path: '.', entries: [], file: null, term: [], loading: false, artifact: null, aTab: 'preview', versions: null } };
+  const THEMES = ['light', 'dark', 'warm'];
+  const theme = {
+    get: () => document.documentElement.getAttribute('data-theme') || '',
+    set(t) { if (t) document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme'); try { if (t) localStorage.setItem('missile_theme', t); else localStorage.removeItem('missile_theme'); } catch {} render(); },
+    toggle() { const cur = this.get() || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); this.set(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]); },
+  };
   async function loadState() { S.st = await api('/api/state'); }
   async function loadConvs() { S.convs = await api('/api/conversations'); }
   const providerOf = (id) => S.st.providers.find((p) => p.id === id);
   const assistantOf = (id) => S.st.assistants.find((a) => a.id === id);
+  const styleOf = (id) => (S.st.styles || []).find((s) => s.id === id);
   const isAdmin = () => S.st && S.st.role === 'admin';
   const activePane = () => S.panes[S.active] || S.panes[0];
+  const textOf = (m) => typeof m.content === 'string' ? m.content : (m.content || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n');
   function targetOf(pane) {
     const c = pane.conv; const pid = c?.provider_id || pane.sel.provider || S.st.default.provider || S.st.providers[0]?.id || '';
     const p = providerOf(pid);
     const model = c?.model || pane.sel.model || (pid === S.st.default.provider ? S.st.default.model : '') || p?.default_model || p?.models?.[0] || '';
     const aid = c?.assistant_id || pane.sel.assistant || S.st.default.assistant || 'default';
-    return { pid, model, aid, provider: p, assistant: assistantOf(aid) };
+    const sid = pane.sel.style !== undefined ? pane.sel.style : (c?.style_id || '');
+    return { pid, model, aid, provider: p, assistant: assistantOf(aid), thinking: pane.sel.thinking || '', styleId: sid, style: styleOf(sid) };
   }
+  async function patchConv(pane, body) { if (!pane.conv) return; try { await api('/api/conversations/' + pane.convId, { method: 'PATCH', body }); Object.assign(pane.conv, body); } catch (e) { toast(e.message, true); } }
+  async function setStyle(pane, sid) { pane.sel.style = sid === 'normal' ? '' : sid; await patchConv(pane, { style_id: pane.sel.style }); render(); }
+  async function setAssistant(pane, aid) { pane.sel.assistant = aid; await patchConv(pane, { assistant_id: aid }); render(); }
 
   // ---------------------------------------------------------------- shell
   function render() {
@@ -110,21 +129,30 @@
     shell.append(main);
     app.append(shell);
   }
+  function openDrawer(tab) { S.drawer.open = true; if (tab) S.drawer.tab = tab; if (tab === 'artifacts') S.drawer.artifact = null; S.view = 'chat'; render(); if (S.drawer.tab === 'files') loadTree(S.drawer.path); }
   function renderRail() {
     const btn = (name, icon, label, onclick) => el('button', { class: S.view === name || (name === 'settings' && S.view.startsWith('settings')) ? 'active' : '', onclick, 'aria-label': label }, I(icon), el('span', { class: 'tip' }, label));
+    const cur = theme.get();
     return el('div', { class: 'rail' },
       el('div', { class: 'logo' }, '🚀'),
       btn('chat', 'chat', 'Chat', () => { S.view = 'chat'; render(); }),
       btn('assistants', 'sparkles', 'Assistants', () => { S.view = 'assistants'; render(); }),
       btn('settings', 'settings', 'Settings', () => { S.view = 'settings'; render(); }),
       el('div', { class: 'bottom' },
-        el('button', { class: S.drawer.open ? 'active' : '', onclick: () => { S.drawer.open = !S.drawer.open; render(); if (S.drawer.open) loadTree(S.drawer.path); }, 'aria-label': 'workspace' }, I('file'), el('span', { class: 'tip' }, 'Workspace (files · editor · terminal)')),
-        el('button', { onclick: () => theme.toggle(), 'aria-label': 'theme' }, I(theme.get() === 'dark' || (!theme.get() && matchMedia('(prefers-color-scheme: dark)').matches) ? 'sun' : 'moon'), el('span', { class: 'tip' }, 'Theme')),
+        el('button', { class: S.drawer.open ? 'active' : '', onclick: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }, 'aria-label': 'workspace' }, I('file'), el('span', { class: 'tip' }, 'Workspace · artifacts (Ctrl/⌘ J)')),
+        el('button', { onclick: () => openPalette(), 'aria-label': 'search' }, I('search'), el('span', { class: 'tip' }, 'Search & commands (Ctrl/⌘ K)')),
+        el('button', { onclick: () => theme.toggle(), 'aria-label': 'theme' }, I(cur === 'dark' ? 'sun' : cur === 'warm' ? 'sparkles' : 'moon'), el('span', { class: 'tip' }, `Theme: ${cur || 'system'} → ${THEMES[(THEMES.indexOf(cur || 'light') + 1) % 3]}`)),
         el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': 'admin' }, I('shield'), el('span', { class: 'tip' }, 'Admin console'))));
   }
 
   // ---------------------------------------------------------------- list panes
   function groupLabel(ts) { const d = new Date(ts * 1000), now = new Date(); if (d.toDateString() === now.toDateString()) return 'Today'; const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === y.toDateString()) return 'Yesterday'; if (now - d < 7 * 86400e3) return 'Previous 7 days'; return 'Older'; }
+  async function deleteConv(id) {
+    if (!(await confirmDialog('Delete this chat and its messages?'))) return;
+    await api('/api/conversations/' + id, { method: 'DELETE' });
+    for (const p of S.panes) if (p.convId === id) { p.convId = null; p.conv = null; p.messages = []; p.branches = {}; }
+    await loadConvs(); render();
+  }
   function renderConvPane() {
     const pane = el('div', { class: 'pane' });
     pane.append(el('div', { class: 'pane-head' }, el('h2', {}, 'Chats'), el('span', { class: 'spacer' }), el('button', { class: 'btn primary sm', onclick: () => newConv(activePane()) }, I('plus', 'sm'), 'New chat')));
@@ -142,12 +170,12 @@
         list.append(el('div', { class: 'pane-item' + (activePane().convId === c.id ? ' active' : ''), style: openIds.has(c.id) && activePane().convId !== c.id ? 'box-shadow: inset 0 0 0 1px var(--border)' : '', onclick: () => openConv(activePane(), c.id) },
           el('div', { class: 'em' }, a?.emoji || '💬'),
           el('div', { class: 'body' }, el('div', { class: 'title truncate' }, c.title || 'New chat'), el('div', { class: 'sub truncate' }, running ? 'running…' : (shortModel(c.model) || providerOf(c.provider_id)?.label || ''))),
-          running ? el('span', { class: 'run', title: 'a turn is running' }) : el('button', { class: 'x', title: 'Delete', onclick: async (e) => { e.stopPropagation(); if (await confirmDialog('Delete this chat and its messages?')) { await api('/api/conversations/' + c.id, { method: 'DELETE' }); for (const p of S.panes) if (p.convId === c.id) { p.convId = null; p.conv = null; p.messages = []; } await loadConvs(); render(); } } }, I('trash', 'xs'))));
+          running ? el('span', { class: 'run', title: 'a turn is running' }) : el('button', { class: 'x', title: 'Delete', onclick: (e) => { e.stopPropagation(); deleteConv(c.id); } }, I('trash', 'xs'))));
       }
       if (!items.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px 10px' }, S.convs.length ? 'No chats match.' : 'No chats yet. Start one.'));
     }
     renderList();
-    pane.append(el('div', { class: 'muted tiny', style: 'padding:8px 14px;border-top:1px solid var(--border)' }, S.panes.length > 1 ? `${S.panes.length} panes · clicking a chat opens it in the highlighted pane` : 'Split the view with the ⫿ button to run chats side by side.'));
+    pane.append(el('div', { class: 'muted tiny', style: 'padding:8px 14px;border-top:1px solid var(--border)' }, S.panes.length > 1 ? `${S.panes.length} panes · clicking a chat opens it in the highlighted pane` : 'Ctrl/⌘ K searches chats and commands · ⫿ splits the view'));
     return pane;
   }
   function renderAssistantPane() {
@@ -155,46 +183,67 @@
     pane.append(el('div', { class: 'pane-head' }, el('h2', {}, 'Assistants'), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; render(); } }, I('edit', 'sm'), 'Manage')));
     const list = el('div', { class: 'pane-list' }); pane.append(list);
     const cur = targetOf(activePane());
-    for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: async () => { const p = activePane(); p.sel.assistant = a.id; if (p.conv) { await api('/api/conversations/' + p.convId, { method: 'PATCH', body: { assistant_id: a.id } }); p.conv.assistant_id = a.id; } render(); } }, el('div', { class: 'em' }, a.emoji || '🤖'), el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
+    for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: () => setAssistant(activePane(), a.id) }, el('div', { class: 'em' }, a.emoji || '🤖'), el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
     list.append(el('div', { style: 'padding:10px' }, el('button', { class: 'btn sm', style: 'width:100%', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), 'Add assistant')));
     return pane;
   }
 
-  // ---------------------------------------------------------------- chat panes
+  // ---------------------------------------------------------------- model picker (quick presets + every model) and thinking
+  async function applyTarget(pane, pid, model, thinking, presetId) {
+    pane.sel.provider = pid; pane.sel.model = model; if (thinking !== undefined) pane.sel.thinking = thinking; pane.sel.preset = presetId || null;
+    await patchConv(pane, { provider_id: pid, model });
+    render();
+  }
   function modelPicker(pane) {
     const t = targetOf(pane);
-    const pill = el('button', { class: 'picker', title: 'Choose model' }, el('span', { class: 'pv' }, (t.provider?.label || t.pid || 'no provider').split(' ')[0]), el('span', { class: 'name truncate' }, shortModel(t.model) || 'pick a model'), I('chevron', 'xs'));
+    const preset = (S.st.model_presets || []).find((p) => p.id === pane.sel.preset && p.provider === t.pid && p.model === t.model);
+    const pill = el('button', { class: 'picker', title: 'Choose model: quick presets first, then every model' }, el('span', { class: 'pv' }, preset ? preset.label : (t.provider?.label || t.pid || 'no provider').split(' ')[0]), el('span', { class: 'name truncate' }, shortModel(t.model) || 'pick a model'), I('chevron', 'xs'));
     pill.addEventListener('click', () => {
       const items = [];
+      if ((S.st.model_presets || []).length) {
+        items.push({ group: 'Quick' });
+        for (const p of S.st.model_presets) items.push({ label: `${p.label} · ${shortModel(p.model)}`, sub: `${providerOf(p.provider)?.label || p.provider}${p.thinking ? ' · ' + THINK_LABEL[p.thinking] : ''}`, icon: p.id === 'fast' ? 'activity' : p.id === 'best' ? 'sparkles' : 'brain', pid: p.provider, model: p.model, thinking: p.thinking, presetId: p.id, selected: preset && preset.id === p.id });
+      }
       for (const p of S.st.providers) {
         const models = [...new Set([p.default_model, ...(p.models || [])].filter(Boolean))];
         items.push({ group: p.label || p.id });
         if (!models.length) items.push({ label: '(no models: Discover in Settings)', sub: p.id, pid: p.id, model: '' });
-        for (const m of models.slice(0, 400)) items.push({ label: shortModel(m), sub: p.id, pid: p.id, model: m, selected: p.id === t.pid && m === t.model });
+        for (const m of models.slice(0, 400)) items.push({ label: shortModel(m), sub: p.id, pid: p.id, model: m, selected: !preset && p.id === t.pid && m === t.model });
       }
       if (!items.length) items.push({ label: 'Add a provider in Settings', sub: '', pid: '', model: '' });
-      menu(pill, items, { searchable: true, onPick: async (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } pane.sel.provider = it.pid; pane.sel.model = it.model; if (pane.conv) { await api('/api/conversations/' + pane.convId, { method: 'PATCH', body: { provider_id: it.pid, model: it.model } }); pane.conv.provider_id = it.pid; pane.conv.model = it.model; } render(); } });
+      menu(pill, items, { searchable: true, onPick: (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } applyTarget(pane, it.pid, it.model, it.thinking, it.presetId); } });
     });
     return pill;
   }
+  const THINK_ORDER = ['', 'on', 'max', 'off'];
+  function cycleThinking(pane) { pane.sel.thinking = THINK_ORDER[(THINK_ORDER.indexOf(pane.sel.thinking || '') + 1) % THINK_ORDER.length]; pane.sel.preset = null; render(); }
+  function thinkingButton(pane) {
+    const cur = pane.sel.thinking || '';
+    return el('button', { class: 'ico' + (cur === 'on' || cur === 'max' ? ' on' : ''), title: `Thinking: ${THINK_LABEL[cur]} · click to cycle (default → on → max → off)`, onclick: () => cycleThinking(pane) }, I('brain', 'sm'));
+  }
+
+  // ---------------------------------------------------------------- chat panes
+  function focusPane(idx) { if (S.active !== idx) { S.active = idx; document.querySelectorAll('.pane-col').forEach((c, i) => c.classList.toggle('active-pane', i === idx && S.panes.length > 1)); } }
   function renderPane(pane, idx) {
     const t = targetOf(pane);
-    const col = el('div', { class: 'pane-col' + (idx === S.active && S.panes.length > 1 ? ' active-pane' : ''), onmousedown: () => { if (S.active !== idx) { S.active = idx; document.querySelectorAll('.pane-col').forEach((c, i) => c.classList.toggle('active-pane', i === idx && S.panes.length > 1)); const list = $('.pane-list'); if (list) { /* refresh highlight */ } } } });
+    const col = el('div', { class: 'pane-col' + (idx === S.active && S.panes.length > 1 ? ' active-pane' : ''), onmousedown: () => focusPane(idx) });
     const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px' }, el('span', { class: 'asst' }, el('span', { class: 'em' }, t.assistant?.emoji || '🤖'), S.panes.length > 1 ? null : (t.assistant?.name || 'Assistant')), I('chevron', 'xs'));
-    asstBtn.addEventListener('click', () => menu(asstBtn, S.st.assistants.map((a) => ({ label: a.name, sub: a.id, id: a.id, selected: a.id === t.aid })), { onPick: async (it) => { pane.sel.assistant = it.id; if (pane.conv) { await api('/api/conversations/' + pane.convId, { method: 'PATCH', body: { assistant_id: it.id } }); pane.conv.assistant_id = it.id; } render(); } }));
+    asstBtn.addEventListener('click', () => menu(asstBtn, S.st.assistants.map((a) => ({ label: a.name, sub: a.id, id: a.id, selected: a.id === t.aid })), { onPick: (it) => setAssistant(pane, it.id) }));
     const toolsOn = pane.sel.tools !== false;
     const toolsBtn = t.provider?.kind === 'agentserver' ? el('span', { class: 'chip info', title: 'tools run on the agent server' }, I('cloud', 'xs')) : el('button', { class: 'ico' + (toolsOn ? ' on' : ''), title: toolsOn ? `${S.st.tools.length} local tools on · click to turn off` : 'tools off · click to turn on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, I('wrench', 'sm'));
-    const bar = el('div', { class: 'topbar' }, asstBtn, modelPicker(pane), toolsBtn, el('span', { class: 'spacer' }));
+    const bar = el('div', { class: 'topbar' }, asstBtn, modelPicker(pane), thinkingButton(pane), toolsBtn, el('span', { class: 'spacer' }));
     if (S.panes.length > 1) bar.append(el('button', { class: 'ico' + (S.linkInputs ? ' on' : ''), title: S.linkInputs ? 'inputs linked: one message goes to every pane' : 'link inputs: send one message to every pane (compare models)', onclick: () => { S.linkInputs = !S.linkInputs; render(); } }, I('link', 'sm')));
-    if (S.panes.length < MAX_PANES) bar.append(el('button', { class: 'ico', title: 'Split: open another chat beside this one', onclick: () => { const np = newPane(); np.sel = { ...pane.sel }; S.panes.splice(idx + 1, 0, np); S.active = idx + 1; render(); } }, I('columns', 'sm')));
-    if (S.panes.length > 1) bar.append(el('button', { class: 'ico', title: 'Close this pane', onclick: () => { S.panes.splice(idx, 1); S.active = Math.min(S.active, S.panes.length - 1); render(); } }, I('x', 'sm')));
-    if (pane.conv) bar.append(el('button', { class: 'ico', title: 'Delete chat', onclick: async () => { if (await confirmDialog('Delete this chat and its messages?')) { await api('/api/conversations/' + pane.convId, { method: 'DELETE' }); for (const p of S.panes) if (p.convId === pane.convId) { p.convId = null; p.conv = null; p.messages = []; } await loadConvs(); render(); } } }, I('trash', 'sm')));
+    if (S.panes.length < MAX_PANES) bar.append(el('button', { class: 'ico', title: 'Split: open another chat beside this one (Ctrl/⌘ \\)', onclick: () => splitPane(idx) }, I('columns', 'sm')));
+    if (S.panes.length > 1) bar.append(el('button', { class: 'ico', title: 'Close this pane', onclick: () => closePane(idx) }, I('x', 'sm')));
+    if (pane.conv) bar.append(el('button', { class: 'ico', title: 'Delete chat', onclick: () => deleteConv(pane.convId) }, I('trash', 'sm')));
     col.append(bar);
     const scroll = el('div', { class: 'chat-scroll' }); const inner = el('div', { class: 'chat-inner' }); scroll.append(inner); col.append(scroll);
     renderMessages(pane, inner);
     col.append(renderComposer(pane));
     return col;
   }
+  function splitPane(idx) { if (S.panes.length >= MAX_PANES) return; const np = newPane(); np.sel = { ...S.panes[idx].sel }; S.panes.splice(idx + 1, 0, np); S.active = idx + 1; S.view = 'chat'; render(); }
+  function closePane(idx) { if (S.panes.length <= 1) return; S.panes.splice(idx, 1); S.active = Math.min(S.active, S.panes.length - 1); render(); }
   function toolCard(call, result) {
     const state = result ? (result.is_error ? 'err' : 'ok') : 'run';
     const d = el('details', { class: 'tool ' + state, open: state !== 'ok' });
@@ -215,43 +264,81 @@
     const content = el('div'); body.append(content);
     return { node, content, body };
   }
-  function addCopyButtons(root) { root.querySelectorAll('pre').forEach((pre) => { if (pre.querySelector('.copy-btn') || pre.closest('.tool')) return; pre.append(el('button', { class: 'copy-btn', onclick: () => navigator.clipboard.writeText(pre.innerText.replace(/copy$/, '')).then(() => toast('copied')) }, 'copy')); }); }
+  // ---- artifacts: long fenced blocks (or any html/svg/markdown document) become cards that open in the drawer
+  function artifactize(mdEl, msgId, convId) {
+    let i = 0;
+    mdEl.querySelectorAll('pre > code').forEach((code) => {
+      const pre = code.parentElement; const text = code.textContent || '';
+      const lines = text.split('\n').filter((l, idx, arr) => !(idx === arr.length - 1 && l === '')).length;
+      const lang = ((code.className.match(/language-([\w+-]+)/) || [])[1] || '').toLowerCase();
+      if (lang === 'replace') return;
+      if (lines < 15 && !['html', 'svg', 'markdown', 'md', 'mermaid'].includes(lang)) return;
+      const id = `${msgId}-${i++}`;
+      const existing = S.artifacts[id];
+      const first = text.split('\n')[0] || '';
+      const hint = (first.match(/^\s*(?:\/\/|#|<!--|--|\/\*)\s*(?:file(?:name)?:)?\s*([\w./-]+\.[a-z0-9]{1,5})/i) || [])[1];
+      const art = existing || { id, lang, code: text, lines, name: hint || `artifact-${Object.keys(S.artifacts).length + 1}.${EXT[lang] || 'txt'}`, convId, msgId, ts: Date.now() };
+      S.artifacts[id] = art;
+      const card = el('div', { class: 'artifact', 'data-art': id },
+        el('div', { class: 'ahead', onclick: () => openArtifact(id) }, el('div', { class: 'aicon' }, I(lang === 'html' || lang === 'svg' ? 'globe' : lang === 'markdown' || lang === 'md' ? 'file' : 'terminal', 'sm')), el('div', { style: 'min-width:0' }, el('div', { class: 'atitle truncate' }, art.name), el('div', { class: 'asub' }, `${lang || 'text'} · ${lines} lines · click to open`)), el('div', { class: 'aactions' }, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => toast('copied')); } }, I('copy', 'xs')), isAdmin() ? el('button', { class: 'btn quiet icon sm', title: 'Save to workspace', onclick: (e) => { e.stopPropagation(); saveArtifact(id); } }, I('download', 'xs')) : null)),
+        el('details', {}, el('summary', {}, 'show code'), pre.cloneNode(true)));
+      pre.replaceWith(card);
+    });
+  }
+  function addCopyButtons(root) { root.querySelectorAll('pre').forEach((pre) => { if (pre.querySelector('.copy-btn') || pre.closest('.tool') || pre.closest('.artifact')) return; pre.append(el('button', { class: 'copy-btn', onclick: () => navigator.clipboard.writeText(pre.innerText.replace(/copy$/, '')).then(() => toast('copied')) }, 'copy')); }); }
+  function branchNav(pane, id) {
+    const b = pane.branches?.[id]; if (!b) return null;
+    const go = async (j) => { try { const c = await api(`/api/conversations/${pane.convId}/head`, { method: 'POST', body: { message_id: b.siblings[j] } }); pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; render(); } catch (e) { toast(e.message, true); } };
+    return el('span', { class: 'branchnav', title: 'this message has other versions' }, el('button', { disabled: b.index === 0, onclick: () => go(b.index - 1) }, '‹'), `${b.index + 1} / ${b.siblings.length}`, el('button', { disabled: b.index >= b.siblings.length - 1, onclick: () => go(b.index + 1) }, '›'));
+  }
   function renderMessages(pane, inner) {
     inner.innerHTML = '';
     const live = pane.convId ? S.live[pane.convId] : null;
     if (!pane.conv || (!pane.messages.length && !live)) {
       const t = targetOf(pane);
-      const sugg = ['Summarize the files in my workspace', 'What tools do you have? Show one example each', 'Write a short project README from notes/', 'Explain this error: ECONNREFUSED 127.0.0.1:11434'];
+      const sugg = ['Summarize the files in my workspace', 'What tools do you have? Show one example each', 'Write a short project README from notes/', 'Build a small HTML page that visualizes a to-do list'];
       inner.append(el('div', { class: 'empty' }, el('div', { class: 'big' }, t.assistant?.emoji || '🚀'), el('h3', {}, t.assistant?.name ? `Chat with ${t.assistant.name}` : 'What can I help with?'), el('div', {}, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model) || 'pick a model'} · ${S.st.tools.length} tools` : 'Add a provider in Settings to start.'), el('div', { class: 'sugg' }, sugg.map((s) => el('button', { onclick: () => { send(pane, s); } }, s)))));
       return;
     }
     const toolResults = {}; for (const m of pane.messages) if (m.role === 'tool') toolResults[m.tool_call_id] = { text: m.content, is_error: m.is_error, images: m.images, decision: m.decision, duration_ms: m.duration_ms };
-    let i = 0;
+    let i = 0; let lastUser = null;
     while (i < pane.messages.length) {
       const m = pane.messages[i];
       if (m.role === 'user') {
-        const text = typeof m.content === 'string' ? m.content : (m.content || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+        lastUser = m;
+        const text = textOf(m);
+        if (pane.editing === m.id) {
+          const ta = el('textarea', { class: 'textarea', style: 'min-height:90px' }); ta.value = text;
+          const go = () => { const v = ta.value.trim(); if (!v) return; pane.editing = null; startStream(pane, v, [], { branchFrom: m.id }); };
+          inner.append(el('div', { class: 'turn-user' }, el('div', { class: 'edit-box' }, ta, el('div', { class: 'row', style: 'justify-content:flex-end' }, el('span', { class: 'muted tiny', style: 'margin-right:auto' }, 'the original stays reachable with ‹ › below the message'), el('button', { class: 'btn sm', onclick: () => { pane.editing = null; render(); } }, 'Cancel'), el('button', { class: 'btn primary sm', onclick: go }, I('send', 'xs'), 'Send as new branch')))));
+          ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); } if (e.key === 'Escape') { pane.editing = null; render(); } });
+          setTimeout(() => ta.focus(), 0); i++; continue;
+        }
         const bub = el('div', { class: 'bubble' }, text);
         for (const p of (Array.isArray(m.content) ? m.content : [])) if (p.type === 'image_url') bub.append(el('img', { src: p.image_url.url }));
-        inner.append(el('div', { class: 'turn-user' }, bub, el('div', { class: 'av' }, '🧑')));
+        inner.append(el('div', { class: 'turn-user' }, el('span', { class: 'uact' }, el('button', { class: 'btn quiet icon sm', title: 'Edit and resend as a new branch', onclick: () => { pane.editing = m.id; render(); } }, I('edit', 'xs')), el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(text).then(() => toast('copied')) }, I('copy', 'xs'))), bub, el('div', { class: 'av' }, '🧑')));
+        const nav = branchNav(pane, m.id); if (nav) inner.append(el('div', { class: 'bnav' }, nav));
         i++; continue;
       }
       if (m.role === 'assistant') {
         const { node, content, body } = assistantTurn(pane, m.meta?.model);
-        let totalMs = 0, usage = null, lastText = '';
+        let totalMs = 0, usage = null, lastText = ''; const firstId = m.id;
         while (i < pane.messages.length && pane.messages[i].role !== 'user') {
           const mm = pane.messages[i];
           if (mm.role === 'assistant') {
             if (mm.thinking) content.append(el('details', { class: 'think' }, el('summary', {}, I('brain', 'sm'), 'Thinking'), el('div', { class: 'tbody' }, mm.thinking)));
-            if (mm.content) { content.append(el('div', { class: 'md', html: md(mm.content) })); lastText = mm.content; }
+            if (mm.content) { const mdEl = el('div', { class: 'md', html: md(mm.content) }); artifactize(mdEl, mm.id, pane.convId); content.append(mdEl); lastText = mm.content; }
             for (const c of mm.tool_calls || []) content.append(toolCard(c, toolResults[c.id]));
             if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage;
           }
           i++;
         }
         const meta = el('div', { class: 'meta' }); if (totalMs) meta.append(el('span', {}, `Processed · ${fmtMs(totalMs)}`)); if (usage) meta.append(el('span', {}, `${usage.input_tokens || 0}↑ ${usage.output_tokens || 0}↓ tokens`));
-        if (lastText) meta.append(el('span', { class: 'actions' }, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(lastText).then(() => toast('copied')) }, I('copy', 'xs'))));
-        body.append(meta); inner.append(node); continue;
+        const nav = branchNav(pane, firstId); if (nav) meta.append(nav);
+        const acts = el('span', { class: 'actions' });
+        if (lastText) acts.append(el('button', { class: 'btn quiet icon sm', title: 'Copy answer', onclick: () => navigator.clipboard.writeText(lastText).then(() => toast('copied')) }, I('copy', 'xs')));
+        if (lastUser) { const lu = lastUser; acts.append(el('button', { class: 'btn quiet icon sm', title: 'Retry: ask again as a new branch', onclick: () => startStream(pane, textOf(lu), [], { branchFrom: lu.id }) }, I('refresh', 'xs'))); }
+        meta.append(acts); body.append(meta); inner.append(node); continue;
       }
       i++;
     }
@@ -259,55 +346,99 @@
     addCopyButtons(inner);
     requestAnimationFrame(() => { inner.parentElement.scrollTop = inner.parentElement.scrollHeight; });
   }
+
+  // ---------------------------------------------------------------- composer: pills, style, "/" commands, long paste as a file
   function renderComposer(pane) {
     const t = targetOf(pane); const live = pane.convId ? S.live[pane.convId] : null;
     const wrap = el('div', { class: 'composer-wrap' });
     const box = el('div', { class: 'composer' });
-    const att = el('div', { class: 'attachments' + (pane.attachments.length ? '' : ' hidden') }); box.append(att);
-    const ta = el('textarea', { class: 'composerInput', rows: 1, placeholder: t.provider ? (S.linkInputs && S.panes.length > 1 ? 'Message every pane. Enter to send.' : 'Type a message. Enter to send, Shift+Enter for a new line.') : 'Add a provider in Settings first…' });
+    const pills = el('div', { class: 'pills' }); box.append(pills);
+    const ta = el('textarea', { class: 'composerInput', rows: 1, placeholder: t.provider ? (S.linkInputs && S.panes.length > 1 ? 'Message every pane. Enter to send, "/" for commands.' : 'Type a message. Enter to send, Shift+Enter for a new line, "/" for commands.') : 'Add a provider in Settings first…' });
     ta.value = pane.draft || '';
-    ta.addEventListener('input', () => { pane.draft = ta.value; ta.style.height = 'auto'; ta.style.height = Math.min(260, ta.scrollHeight) + 'px'; });
-    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(pane); } });
-    ta.addEventListener('focus', () => { const idx = S.panes.indexOf(pane); if (idx >= 0 && S.active !== idx) { S.active = idx; document.querySelectorAll('.pane-col').forEach((c, i) => c.classList.toggle('active-pane', i === idx && S.panes.length > 1)); } });
+    let slash = null;
+    const closeSlash = () => { if (slash) { slash.el.remove(); slash = null; } };
+    ta.addEventListener('input', () => {
+      pane.draft = ta.value; ta.style.height = 'auto'; ta.style.height = Math.min(260, ta.scrollHeight) + 'px';
+      const m = ta.value.match(/^\/(\S*)$/);
+      if (m) { if (slash) slash.rerender(m[1]); else slash = openSlash(pane, ta, m[1]); } else closeSlash();
+    });
+    ta.addEventListener('keydown', (e) => {
+      if (slash && e.key === 'Enter') { e.preventDefault(); const s = slash; slash = null; s.pickFirst(); return; }
+      if (slash && e.key === 'Escape') { closeSlash(); return; }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(pane); }
+    });
+    ta.addEventListener('blur', () => setTimeout(closeSlash, 150));
+    ta.addEventListener('focus', () => { const idx = S.panes.indexOf(pane); if (idx >= 0) focusPane(idx); });
+    ta.addEventListener('paste', async (e) => {
+      const items = e.clipboardData?.items || []; let handled = false;
+      for (const it of items) if (it.type.startsWith('image/')) { handled = true; const fd = new FormData(); fd.append('file', it.getAsFile(), 'pasted.png'); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); renderPills(); } catch (err) { toast(err.message, true); } }
+      const text = e.clipboardData?.getData('text/plain') || '';
+      if (!handled && text.length > 2000) { e.preventDefault(); pane.attachments.push({ name: `pasted-${pane.attachments.length + 1}.txt`, text }); renderPills(); toast('long paste attached as a file'); }
+    });
     box.append(ta);
-    const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { for (const f of e.target.files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } e.target.value = ''; renderAtt(); } });
+    const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { for (const f of e.target.files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } e.target.value = ''; renderPills(); } });
+    const styleBtn = el('button', { class: 'btn quiet sm', title: 'Writing style' }, I('wand', 'sm'), t.style && t.style.id !== 'normal' ? t.style.name : 'Style');
+    styleBtn.addEventListener('click', () => menu(styleBtn, (S.st.styles || []).map((s) => ({ label: s.name, sub: s.prompt ? s.prompt.slice(0, 40) + '…' : '', id: s.id, selected: s.id === (t.styleId || 'normal') })), { onPick: (it) => setStyle(pane, it.id) }));
     const bar = el('div', { class: 'bar' },
       el('button', { class: 'btn quiet icon sm', title: 'Attach file or image', onclick: () => fileInput.click() }, I('paperclip', 'sm')), fileInput,
-      el('button', { class: 'btn quiet icon sm', title: 'New chat in this pane', onclick: () => newConv(pane) }, I('plus', 'sm')),
+      el('button', { class: 'btn quiet icon sm', title: 'New chat in this pane (Ctrl/⌘ Shift O)', onclick: () => newConv(pane) }, I('plus', 'sm')),
+      styleBtn,
       el('span', { class: 'spacer' }),
       el('span', { class: 'muted tiny truncate', style: 'max-width:220px' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : ''),
       live ? el('button', { class: 'stop', onclick: () => stopTurn(pane) }, I('stop', 'sm'), 'Stop') : el('button', { class: 'send', title: 'Send', onclick: () => send(pane), disabled: !t.provider }, I('send', 'sm')));
     box.append(bar); wrap.append(box);
-    function renderAtt() { att.innerHTML = ''; att.classList.toggle('hidden', !pane.attachments.length); pane.attachments.forEach((a, i) => att.append(el('span', { class: 'chip' }, a.data_url ? '🖼' : '📄', a.name, el('button', { onclick: () => { pane.attachments.splice(i, 1); renderAtt(); } }, '✕')))); }
-    renderAtt();
-    box.addEventListener('paste', async (e) => { for (const it of e.clipboardData?.items || []) if (it.type.startsWith('image/')) { const fd = new FormData(); fd.append('file', it.getAsFile(), 'pasted.png'); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); renderAtt(); } catch (err) { toast(err.message, true); } } });
+    function renderPills() {
+      pills.innerHTML = '';
+      const toolsOn = pane.sel.tools !== false;
+      if (t.provider?.kind !== 'agentserver') pills.append(el('span', { class: 'chip' + (toolsOn ? ' primary' : ''), title: toolsOn ? 'local tools on' : 'local tools off' }, I('wrench', 'xs'), toolsOn ? `${S.st.tools.length} tools` : 'tools off', el('button', { title: toolsOn ? 'turn tools off' : 'turn tools on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, toolsOn ? '✕' : '＋')));
+      if (pane.sel.thinking) pills.append(el('span', { class: 'chip info' }, I('brain', 'xs'), THINK_LABEL[pane.sel.thinking], el('button', { title: 'back to provider default', onclick: () => { pane.sel.thinking = ''; render(); } }, '✕')));
+      if (t.style && t.style.id !== 'normal') pills.append(el('span', { class: 'chip' }, I('wand', 'xs'), t.style.name, el('button', { title: 'normal style', onclick: () => setStyle(pane, '') }, '✕')));
+      pane.attachments.forEach((a, i) => pills.append(el('span', { class: 'chip' }, a.data_url ? '🖼' : '📄', a.name, el('button', { onclick: () => { pane.attachments.splice(i, 1); renderPills(); } }, '✕'))));
+      pills.classList.toggle('hidden', !pills.children.length);
+    }
+    renderPills();
     return wrap;
   }
-  function newConv(pane) { pane.convId = null; pane.conv = null; pane.messages = []; S.view = 'chat'; render(); $('.composerInput')?.focus(); }
+  function openSlash(pane, ta, q) {
+    const items = [{ group: 'Commands' },
+      { label: '/new', sub: 'new chat in this pane', icon: 'plus', run: () => newConv(pane) },
+      { label: '/split', sub: 'open another pane', icon: 'columns', run: () => splitPane(S.panes.indexOf(pane)) },
+      { label: '/files', sub: 'open the workspace drawer', icon: 'file', run: () => openDrawer('files') },
+      { label: '/terminal', sub: 'open the terminal', icon: 'terminal', run: () => openDrawer('terminal') },
+      { label: '/artifacts', sub: 'open generated artifacts', icon: 'box', run: () => openDrawer('artifacts') },
+      { label: '/tools', sub: pane.sel.tools === false ? 'turn local tools on' : 'turn local tools off', icon: 'wrench', run: () => { pane.sel.tools = pane.sel.tools === false; render(); } },
+      { label: '/think', sub: 'cycle thinking: default → on → max → off', icon: 'brain', run: () => cycleThinking(pane) },
+      { label: '/clear', sub: 'clear the draft', icon: 'x', run: () => { pane.draft = ''; render(); } },
+      { group: 'Assistants' }, ...S.st.assistants.map((a) => ({ label: `/assistant ${a.id}`, sub: a.name, icon: 'sparkles', run: () => setAssistant(pane, a.id) })),
+      { group: 'Styles' }, ...(S.st.styles || []).map((s) => ({ label: `/style ${s.id}`, sub: s.name, icon: 'wand', run: () => setStyle(pane, s.id) })),
+      { group: 'Tools (inserts a request to use the tool)' }, ...S.st.tools.map((tl) => ({ label: `/tool ${tl.full_name}`, sub: (tl.description || '').slice(0, 50), icon: 'wrench', insert: `Use the \`${tl.full_name}\` tool to ` }))];
+    return menu(ta, items, { filter: q, onPick: (it) => { if (it.insert) { ta.value = it.insert; pane.draft = ta.value; ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } else { ta.value = ''; pane.draft = ''; it.run(); } } });
+  }
+  function newConv(pane) { pane.convId = null; pane.conv = null; pane.messages = []; pane.branches = {}; pane.editing = null; S.view = 'chat'; render(); $('.composerInput', paneEl(pane))?.focus(); }
   async function openConv(pane, id) {
-    const c = await api('/api/conversations/' + id); pane.convId = id; pane.conv = c; pane.messages = c.messages || []; S.view = 'chat'; render();
+    const c = await api('/api/conversations/' + id); pane.convId = id; pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; pane.editing = null; S.view = 'chat'; render();
   }
   async function stopTurn(pane) { if (pane.convId) await api(`/api/chat/${pane.convId}/stop`, { method: 'POST' }).catch(() => {}); const live = S.live[pane.convId]; if (live?.abort) live.abort.abort(); }
   async function refreshConv(convId) {
     let c; try { c = await api('/api/conversations/' + convId); } catch { return; }
-    for (const p of S.panes) if (p.convId === convId) { p.conv = c; p.messages = c.messages || []; }
+    for (const p of S.panes) if (p.convId === convId) { p.conv = c; p.messages = c.messages || []; p.branches = c.branches || {}; }
     try { await loadConvs(); } catch {}
   }
 
   // ---------------------------------------------------------------- sending (one stream per conversation, many at once)
+  const paneEl = (pane) => document.querySelectorAll('.pane-col')[S.panes.indexOf(pane)] || document;
   async function send(pane, forcedText) {
     const ta = $('.composerInput', paneEl(pane)); const text = (forcedText || ta?.value || '').trim(); if (!text) return;
     if (S.linkInputs && S.panes.length > 1 && !forcedText) { for (const p of S.panes) { p.draft = ''; startStream(p, text, p === pane ? pane.attachments.splice(0) : []); } return; }
     pane.draft = '';
     await startStream(pane, text, pane.attachments.splice(0));
   }
-  const paneEl = (pane) => document.querySelectorAll('.pane-col')[S.panes.indexOf(pane)] || document;
-  async function startStream(pane, text, atts) {
+  async function startStream(pane, text, atts, opts = {}) {
     const t = targetOf(pane); if (!t.pid) return toast('Add a provider first (Settings → Model providers)', true);
     if (pane.convId && S.live[pane.convId]) return toast('this chat is still answering; open a new pane to run another', true);
-    if (!pane.conv) { try { pane.conv = await api('/api/conversations', { method: 'POST', body: { assistant_id: t.aid, provider_id: t.pid, model: t.model } }); } catch (e) { return toast(e.message, true); } pane.convId = pane.conv.id; pane.messages = []; await loadConvs(); }
+    if (!pane.conv) { try { pane.conv = await api('/api/conversations', { method: 'POST', body: { assistant_id: t.aid, provider_id: t.pid, model: t.model } }); } catch (e) { return toast(e.message, true); } pane.convId = pane.conv.id; pane.messages = []; pane.branches = {}; await loadConvs(); }
     const convId = pane.convId;
-    const userMsg = { role: 'user', content: atts.some((a) => a.data_url) ? [{ type: 'text', text }, ...atts.filter((a) => a.data_url).map((a) => ({ type: 'image_url', image_url: { url: a.data_url } }))] : text };
+    if (opts.branchFrom) { const idx = pane.messages.findIndex((m) => m.id === opts.branchFrom); if (idx >= 0) pane.messages = pane.messages.slice(0, idx); }
     const userNode = el('div', { class: 'turn-user' }, el('div', { class: 'bubble' }, text, ...atts.filter((a) => a.data_url).map((a) => el('img', { src: a.data_url }))), el('div', { class: 'av' }, '🧑'));
     const { node, content } = assistantTurn(pane, t.model);
     const live = { convId, node, userNode, content, abort: new AbortController(), textBuf: '', thinkBuf: '', mdEl: null, thinkEl: null, statusEl: null, cards: {} };
@@ -316,7 +447,7 @@
     const scrollOf = () => { const inner = node.closest('.chat-inner'); return inner ? inner.parentElement : null; };
     const flush = () => { if (!live.mdEl) { live.mdEl = el('div', { class: 'md cursor' }); content.append(live.mdEl); } live.mdEl.innerHTML = md(live.textBuf); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; };
     try {
-      const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'missile-admin', ...headers() }, body: JSON.stringify({ conversation_id: convId, text, provider_id: t.pid, model: t.model, assistant_id: t.aid, attachments: atts, tools: pane.sel.tools === false ? 'none' : null }), signal: live.abort.signal });
+      const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ conversation_id: convId, text, provider_id: t.pid, model: t.model, assistant_id: t.aid, attachments: atts, tools: opts.tools !== undefined ? opts.tools : (pane.sel.tools === false ? 'none' : null), thinking: t.thinking, style_id: t.styleId || '', branch_from: opts.branchFrom || '' }), signal: live.abort.signal });
       if (!r.ok) throw new Error((await r.text()) || r.statusText);
       const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
       while (true) {
@@ -330,7 +461,7 @@
         }
       }
     } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); }
-    finally { delete S.live[convId]; await refreshConv(convId); render(); }
+    finally { delete S.live[convId]; await refreshConv(convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); }
     function handle(ev) {
       switch (ev.type) {
         case 'text_delta': live.textBuf += ev.text; flush(); break;
@@ -344,36 +475,88 @@
       }
     }
   }
-  // keep the chat list's running dots fresh (turns started from other devices too)
   setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } } catch {} }, 6000);
 
-  // ---------------------------------------------------------------- workspace drawer (files · editor · terminal)
+  // ---------------------------------------------------------------- palette (Ctrl/⌘ K) + shortcuts (Ctrl/⌘ /)
+  function openPalette() {
+    $('.palette')?.remove();
+    const ov = el('div', { class: 'palette', onclick: (e) => { if (e.target === ov) close(); } });
+    const inp = el('input', { placeholder: 'Search chats, run a command, or type a question…' });
+    const list = el('div', { class: 'list' });
+    ov.append(el('div', { class: 'box' }, inp, list)); document.body.append(ov);
+    let hl = 0, rows = [];
+    const actions = [
+      { label: 'New chat', sub: 'Ctrl/⌘ Shift O', icon: 'plus', run: () => newConv(activePane()) },
+      { label: 'Split pane', sub: 'Ctrl/⌘ \\', icon: 'columns', run: () => splitPane(S.active) },
+      { label: 'Toggle workspace drawer', sub: 'Ctrl/⌘ J', icon: 'file', run: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); } },
+      { label: 'Artifacts', sub: 'generated code & documents', icon: 'box', run: () => openDrawer('artifacts') },
+      { label: 'Link pane inputs', sub: S.linkInputs ? 'on' : 'off', icon: 'link', run: () => { S.linkInputs = !S.linkInputs; render(); } },
+      { label: 'Theme: light / dark / warm', sub: theme.get() || 'system', icon: 'moon', run: () => theme.toggle() },
+      { label: 'Settings · Model providers', icon: 'cloud', run: () => { S.view = 'settings'; S.settingsPage = 'providers'; render(); } },
+      { label: 'Settings · MCP servers', icon: 'plug', run: () => { S.view = 'settings'; S.settingsPage = 'mcp'; render(); } },
+      { label: 'Settings · Tools & policy', icon: 'wrench', run: () => { S.view = 'settings'; S.settingsPage = 'tools'; render(); } },
+      { label: 'Settings · Assistants', icon: 'sparkles', run: () => { S.view = 'settings'; S.settingsPage = 'assistants'; render(); } },
+      { label: 'Settings · Writing styles', icon: 'wand', run: () => { S.view = 'settings'; S.settingsPage = 'styles'; render(); } },
+      { label: 'Admin console', icon: 'shield', run: () => window.open('/admin', '_blank') },
+      { label: 'Keyboard shortcuts', sub: 'Ctrl/⌘ /', icon: 'info', run: () => openShortcuts() },
+    ];
+    const build = () => {
+      const q = inp.value.trim(); const ql = q.toLowerCase(); list.innerHTML = ''; rows = [];
+      const addRow = (node, run) => { const i = rows.length; rows.push({ node, run }); node.addEventListener('click', () => { close(); run(); }); node.addEventListener('mousemove', () => { hl = i; paint(); }); list.append(node); };
+      const chats = S.convs.filter((c) => !ql || (c.title || '').toLowerCase().includes(ql)).slice(0, ql ? 12 : 6);
+      if (chats.length) { list.append(el('div', { class: 'grp' }, 'Chats')); for (const c of chats) addRow(el('div', { class: 'it' }, el('span', {}, assistantOf(c.assistant_id)?.emoji || '💬'), el('span', { class: 'truncate' }, c.title || 'New chat'), el('span', { class: 'sub' }, shortModel(c.model))), () => openConv(activePane(), c.id)); }
+      const acts = actions.filter((a) => !ql || (a.label + ' ' + (a.sub || '')).toLowerCase().includes(ql));
+      if (acts.length) { list.append(el('div', { class: 'grp' }, 'Commands')); for (const a of acts) addRow(el('div', { class: 'it' }, I(a.icon, 'sm'), el('span', {}, a.label), a.sub ? el('span', { class: 'sub' }, a.sub) : null), a.run); }
+      if (q) { list.append(el('div', { class: 'grp' }, 'Ask')); addRow(el('div', { class: 'it' }, I('send', 'sm'), el('span', { class: 'truncate' }, `Ask: ${q}`), el('span', { class: 'sub' }, 'Enter')), () => { S.view = 'chat'; render(); send(activePane(), q); }); }
+      hl = 0; paint();
+    };
+    const paint = () => rows.forEach((r, i) => r.node.classList.toggle('hl', i === hl));
+    const close = () => { ov.remove(); document.removeEventListener('keydown', key); };
+    const key = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } else if (e.key === 'ArrowDown') { e.preventDefault(); hl = Math.min(hl + 1, rows.length - 1); paint(); } else if (e.key === 'ArrowUp') { e.preventDefault(); hl = Math.max(hl - 1, 0); paint(); } else if (e.key === 'Enter') { e.preventDefault(); const r = rows[hl]; if (r) { close(); r.run(); } } };
+    inp.addEventListener('input', build); document.addEventListener('keydown', key); build(); setTimeout(() => inp.focus(), 0);
+  }
+  function openShortcuts() {
+    const rows = [['Ctrl/⌘ K', 'Search chats & commands'], ['Ctrl/⌘ Shift O', 'New chat in the active pane'], ['Ctrl/⌘ \\', 'Split the view'], ['Ctrl/⌘ Shift W', 'Close the active pane'], ['Ctrl/⌘ J', 'Workspace drawer'], ['Ctrl/⌘ S', 'Save the open file'], ['Ctrl/⌘ ,', 'Settings'], ['Ctrl/⌘ /', 'This panel'], ['Shift Esc', 'Focus the message box'], ['Ctrl/⌘ Shift C', 'Copy the last answer'], ['Ctrl/⌘ Shift ;', 'Copy the last code block'], ['Enter / Shift Enter', 'Send / new line'], ['/ at the start', 'Commands: /new /split /files /terminal /artifacts /tools /think /style /assistant /tool'], ['Esc (while editing)', 'Cancel editing a message']];
+    modal({ title: 'Keyboard shortcuts', body: el('div', { class: 'shortcuts' }, rows.map(([k, d]) => el('div', {}, el('span', {}, d), el('span', { class: 'kbd' }, k)))) });
+  }
+  function lastAssistantText(pane) { for (let i = pane.messages.length - 1; i >= 0; i--) { const m = pane.messages[i]; if (m.role === 'assistant' && m.content) return m.content; } return ''; }
+
+  // ---------------------------------------------------------------- workspace drawer (files · editor · terminal · artifacts)
+  const redrawDrawer = () => { const d = $('.drawer'); if (d) d.replaceWith(renderDrawer()); };
   async function loadTree(path) {
     S.drawer.loading = true;
     try { const r = await api(`/api/workspace/tree?path=${encodeURIComponent(path || '.')}`); S.drawer.path = r.path; S.drawer.entries = r.entries; S.drawer.root = r.root; } catch (e) { toast(e.message, true); }
     S.drawer.loading = false;
-    const d = $('.drawer'); if (d) d.replaceWith(renderDrawer());
+    redrawDrawer();
   }
   async function openFile(path) {
-    try { const r = await api(`/api/workspace/file?path=${encodeURIComponent(path)}`); S.drawer.file = { path: r.path, content: r.content, saved: r.content, size: r.size }; S.drawer.tab = 'editor'; const d = $('.drawer'); if (d) d.replaceWith(renderDrawer()); } catch (e) { toast(e.message, true); }
+    try { const r = await api(`/api/workspace/file?path=${encodeURIComponent(path)}`); S.drawer.file = { path: r.path, content: r.content, saved: r.content, size: r.size }; S.drawer.tab = 'editor'; S.drawer.versions = null; redrawDrawer(); } catch (e) { toast(e.message, true); }
   }
   async function saveFile() {
     const f = S.drawer.file; if (!f) return;
-    try { const r = await api('/api/workspace/file', { method: 'PUT', body: { path: f.path, content: f.content } }); f.saved = f.content; f.size = r.size; toast('saved ' + f.path); const d = $('.drawer'); if (d) d.replaceWith(renderDrawer()); } catch (e) { toast(e.message, true); }
+    try { const r = await api('/api/workspace/file', { method: 'PUT', body: { path: f.path, content: f.content } }); f.saved = f.content; f.size = r.size; toast('saved ' + f.path + (r.versioned ? ' · previous version kept' : '')); redrawDrawer(); } catch (e) { toast(e.message, true); }
   }
   async function runCommand(cmd) {
     const term = S.drawer.term; term.push({ kind: 'cmd', text: cmd });
-    if (cmd === 'clear') { S.drawer.term = []; const d = $('.drawer'); if (d) d.replaceWith(renderDrawer()); return; }
+    if (cmd === 'clear') { S.drawer.term = []; redrawDrawer(); return; }
     term.push({ kind: 'meta', text: 'running…' });
-    let d = $('.drawer'); if (d) d.replaceWith(renderDrawer());
+    redrawDrawer();
     try { const r = await api('/api/workspace/run', { method: 'POST', body: { command: cmd, cwd: S.drawer.path === '.' ? '' : S.drawer.path, timeout_seconds: 120 } }); term.pop(); term.push({ kind: /\[exit 0\]\s*$/.test(r.output) ? 'out' : 'err', text: r.output }); term.push({ kind: 'meta', text: `· ${fmtMs(r.duration_ms)}` }); loadTree(S.drawer.path); }
     catch (e) { term.pop(); term.push({ kind: 'err', text: e.message }); }
-    d = $('.drawer'); if (d) d.replaceWith(renderDrawer());
+    redrawDrawer();
   }
+  function openArtifact(id) { S.drawer.open = true; S.drawer.tab = 'artifacts'; S.drawer.artifact = id; S.drawer.aTab = PREVIEWABLE.includes(S.artifacts[id]?.lang) ? 'preview' : 'code'; S.drawer.versions = null; render(); }
+  async function saveArtifact(id) {
+    const a = S.artifacts[id]; if (!a) return;
+    const path = await promptDialog('Save to workspace as', a.savedPath || `artifacts/${a.name}`, 'Relative to the workspace folder. Saving over an existing file keeps the previous version.');
+    if (!path) return;
+    try { const r = await api('/api/workspace/file', { method: 'PUT', body: { path, content: a.code } }); a.savedPath = path; toast(`saved ${path}` + (r.versioned ? ' · previous version kept' : '')); loadTree(S.drawer.path); } catch (e) { toast(e.message, true); }
+  }
+  function allArtifacts() { for (const p of S.panes) for (const m of p.messages) if (m.role === 'assistant' && m.content) { const tmp = el('div', { html: md(m.content) }); artifactize(tmp, m.id, p.convId); } return Object.values(S.artifacts).sort((a, b) => b.ts - a.ts); }
   function renderDrawer() {
     const D = S.drawer; const root = el('div', { class: 'drawer' });
     const tab = (id, icon, label) => el('button', { class: 'tab' + (D.tab === id ? ' active' : ''), onclick: () => { D.tab = id; root.replaceWith(renderDrawer()); if (id === 'files' && !D.entries.length) loadTree(D.path); } }, I(icon, 'sm'), label);
-    root.append(el('div', { class: 'dhead' }, tab('files', 'file', 'Files'), tab('editor', 'edit', D.file ? (D.file.content !== D.file.saved ? '● ' : '') + D.file.path.split('/').pop() : 'Editor'), tab('terminal', 'terminal', 'Terminal'), el('span', { class: 'spacer' }), el('button', { class: 'btn quiet icon sm', title: 'refresh', onclick: () => loadTree(D.path) }, I('refresh', 'sm')), el('button', { class: 'btn quiet icon sm', title: 'close', onclick: () => { D.open = false; render(); } }, I('x', 'sm'))));
+    root.append(el('div', { class: 'dhead' }, tab('files', 'file', 'Files'), tab('editor', 'edit', D.file ? (D.file.content !== D.file.saved ? '● ' : '') + D.file.path.split('/').pop() : 'Editor'), tab('terminal', 'terminal', 'Terminal'), tab('artifacts', 'box', 'Artifacts'), el('span', { class: 'spacer' }), el('button', { class: 'btn quiet icon sm', title: 'refresh', onclick: () => loadTree(D.path) }, I('refresh', 'sm')), el('button', { class: 'btn quiet icon sm', title: 'close', onclick: () => { D.open = false; render(); } }, I('x', 'sm'))));
     const body = el('div', { class: 'dbody' }); root.append(body);
     if (D.tab === 'files') {
       const parts = D.path === '.' ? [] : D.path.split('/');
@@ -383,19 +566,12 @@
       const tree = el('div', { class: 'tree' });
       if (D.path !== '.') tree.append(el('div', { class: 'row', onclick: () => loadTree(parts.slice(0, -1).join('/') || '.') }, I('chevronR', 'xs'), '..'));
       for (const e of D.entries) tree.append(el('div', { class: 'row' + (D.file && D.file.path === e.path ? ' sel' : ''), onclick: () => e.dir ? loadTree(e.path) : openFile(e.path) }, I(e.dir ? 'box' : 'file', 'sm'), el('span', { class: 'truncate' }, e.name), e.dir ? null : el('span', { class: 'sz' }, fmtBytes(e.size))));
-      if (!D.entries.length && !D.loading) tree.append(el('div', { class: 'muted tiny', style: 'padding:10px' }, 'Empty folder. Ask the agent to create something, or use the terminal.'));
+      if (!D.entries.length && !D.loading) tree.append(el('div', { class: 'muted tiny', style: 'padding:10px' }, 'Empty folder. Ask the agent to create something, save an artifact, or use the terminal.'));
       body.append(tree);
       body.append(el('div', { class: 'dfoot' }, D.root || ''));
-    } else if (D.tab === 'editor') {
-      if (!D.file) body.append(el('div', { class: 'empty' }, el('div', { class: 'big' }, '📝'), el('h3', {}, 'No file open'), el('div', {}, 'Pick one in Files. Agents write here too; the tree refreshes after their tool calls.')));
-      else {
-        const f = D.file; const dirty = f.content !== f.saved;
-        const ed = el('div', { class: 'editor' });
-        ed.append(el('div', { class: 'ehead' }, el('span', { class: 'mono truncate' }, f.path), el('span', { class: 'muted' }, fmtBytes(f.size)), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', title: 'Ask the active pane about this file', onclick: () => { const p = activePane(); p.draft = (p.draft ? p.draft + '\n' : '') + `Look at ${f.path} and `; render(); $('.composerInput')?.focus(); } }, I('chat', 'sm'), 'Ask'), isAdmin() ? el('button', { class: 'btn primary sm', disabled: !dirty, onclick: saveFile }, I('check', 'sm'), dirty ? 'Save' : 'Saved') : el('span', { class: 'chip' }, 'read-only')));
-        const ta = el('textarea', { spellcheck: 'false', readonly: !isAdmin() || undefined, oninput: (e) => { f.content = e.target.value; const t = $('.drawer .dhead .tab:nth-child(2)'); if (t) t.lastChild.textContent = (f.content !== f.saved ? '● ' : '') + f.path.split('/').pop(); const b = $('.drawer .ehead .btn.primary'); if (b) { b.disabled = f.content === f.saved; b.lastChild.textContent = f.content === f.saved ? 'Saved' : 'Save'; } }, onkeydown: (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); } if (e.key === 'Tab') { e.preventDefault(); const s = e.target.selectionStart; e.target.setRangeText('  ', s, e.target.selectionEnd, 'end'); f.content = e.target.value; } } });
-        ta.value = f.content; ed.append(ta); body.append(ed);
-      }
-    } else {
+    } else if (D.tab === 'editor') body.append(renderEditor());
+    else if (D.tab === 'artifacts') body.append(renderArtifacts());
+    else {
       const term = el('div', { class: 'term' });
       const out = el('div', { class: 'tout' });
       if (!D.term.length) out.append(el('span', { class: 'meta' }, `workspace shell · ${navigator.platform.startsWith('Win') ? 'PowerShell' : 'sh'} · commands run on the server inside ${D.root || 'the workspace'} · "clear" clears\n`));
@@ -408,11 +584,110 @@
     }
     return root;
   }
+  // ---- editor with selection-based editing and saved versions
+  function renderEditor() {
+    const D = S.drawer;
+    if (!D.file) return el('div', { class: 'empty' }, el('div', { class: 'big' }, '📝'), el('h3', {}, 'No file open'), el('div', {}, 'Pick one in Files, or open an artifact. Select text to ask the chat to rewrite just that part.'));
+    const f = D.file; const dirty = f.content !== f.saved;
+    const ed = el('div', { class: 'editor' });
+    const versionsBtn = el('button', { class: 'btn sm', title: 'Previous saved versions', onclick: async () => { try { const h = await api(`/api/workspace/history?path=${encodeURIComponent(f.path)}`); D.versions = h.versions; ed.replaceWith(renderEditor()); } catch (e) { toast(e.message, true); } } }, I('clock', 'sm'), 'Versions');
+    ed.append(el('div', { class: 'ehead' }, el('span', { class: 'mono truncate' }, f.path), el('span', { class: 'muted' }, fmtBytes(f.size)), el('span', { class: 'spacer' }), versionsBtn, el('button', { class: 'btn sm', title: 'Ask the active pane about this file', onclick: () => { const p = activePane(); p.draft = (p.draft ? p.draft + '\n' : '') + `Look at ${f.path} and `; render(); $('.composerInput', paneEl(p))?.focus(); } }, I('chat', 'sm'), 'Ask'), isAdmin() ? el('button', { class: 'btn primary sm', disabled: !dirty, onclick: saveFile }, I('check', 'sm'), dirty ? 'Save' : 'Saved') : el('span', { class: 'chip' }, 'read-only')));
+    if (D.versions) {
+      ed.append(el('div', { class: 'row', style: 'padding:6px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap;font-size:12px' }, el('span', { class: 'muted' }, D.versions.length ? 'versions:' : 'no previous versions'), ...D.versions.slice(0, 8).map((v) => el('button', { class: 'btn sm', onclick: async () => { try { const r = await api(`/api/workspace/history/file?name=${encodeURIComponent(v.name)}`); showDiff(`Version from ${new Date(v.ts * 1000).toLocaleString()}`, f.content, r.content, () => { f.content = r.content; ed.replaceWith(renderEditor()); }); } catch (e) { toast(e.message, true); } } }, new Date(v.ts * 1000).toLocaleTimeString())), el('button', { class: 'btn quiet sm', onclick: () => { D.versions = null; ed.replaceWith(renderEditor()); } }, 'hide')));
+    }
+    const ta = el('textarea', { spellcheck: 'false', readonly: !isAdmin() || undefined });
+    ta.value = f.content;
+    ta.addEventListener('input', () => { f.content = ta.value; const t = $('.drawer .dhead .tab:nth-child(2)'); if (t) t.lastChild.textContent = (f.content !== f.saved ? '● ' : '') + f.path.split('/').pop(); const b = $('.drawer .ehead .btn.primary'); if (b) { b.disabled = f.content === f.saved; b.lastChild.textContent = f.content === f.saved ? 'Saved' : 'Save'; } });
+    ta.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); } if (e.key === 'Tab') { e.preventDefault(); const s = e.target.selectionStart; e.target.setRangeText('  ', s, e.target.selectionEnd, 'end'); f.content = e.target.value; } });
+    let tool = null;
+    const showTool = () => {
+      const s = ta.selectionStart, e = ta.selectionEnd;
+      if (tool) { tool.remove(); tool = null; }
+      if (s === e || !isAdmin()) return;
+      const sel = ta.value.slice(s, e);
+      const inp = el('input', { placeholder: 'Ask to change the selection…' });
+      const go = (instr, mode = 'replace') => { tool?.remove(); tool = null; requestSelectionEdit(f, s, e, sel, instr, mode); };
+      tool = el('div', { class: 'seltool', onmousedown: (ev) => ev.stopPropagation() }, inp, el('button', { class: 'btn primary sm', onclick: () => inp.value.trim() && go(inp.value.trim()) }, I('send', 'xs')), el('button', { class: 'btn sm', title: 'Fix bugs in the selection', onclick: () => go('Fix any bugs or mistakes in this selection. Keep the behaviour and style otherwise.') }, 'Fix'), el('button', { class: 'btn sm', title: 'Add explanatory comments', onclick: () => go('Add short, useful comments to this selection. Do not change the logic.') }, 'Comment'), el('button', { class: 'btn sm', title: 'Explain in chat (no change)', onclick: () => go('Explain what this selection does and point out anything risky.', 'ask') }, 'Explain'), el('button', { class: 'btn sm', title: 'Review in chat (no change)', onclick: () => go('Review this selection like a careful senior engineer: correctness, edge cases, naming. Be concrete.', 'ask') }, 'Review'));
+      inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && inp.value.trim()) go(inp.value.trim()); if (ev.key === 'Escape') { tool?.remove(); tool = null; } });
+      tool.style.top = '52px'; tool.style.left = '12px'; ed.append(tool);
+    };
+    ta.addEventListener('mouseup', () => setTimeout(showTool, 0));
+    ta.addEventListener('keyup', (e) => { if (e.shiftKey || e.key === 'Shift') setTimeout(showTool, 0); });
+    ed.append(ta);
+    return ed;
+  }
+  function requestSelectionEdit(f, start, end, selection, instruction, mode) {
+    const pane = activePane(); const ext = (f.path.split('.').pop() || '').toLowerCase(); const lang = EXT[ext] ? ext : '';
+    const lineA = f.content.slice(0, start).split('\n').length, lineB = lineA + selection.split('\n').length - 1;
+    let prompt;
+    if (mode === 'replace') {
+      prompt = `Edit a selection inside \`${f.path}\` (lines ${lineA}-${lineB}). ${instruction}\n\nReturn ONLY the replacement for the selected text inside one \`\`\`replace fenced block, with no explanation before or after it.\n\nSelected text:\n\`\`\`${lang}\n${selection}\n\`\`\`\n\nFor context, the file starts with:\n\`\`\`${lang}\n${f.content.slice(0, 2500)}${f.content.length > 2500 ? '\n…' : ''}\n\`\`\``;
+      pane.pendingEdit = { path: f.path, start, end, selection };
+    } else {
+      prompt = `${instruction}\n\nSelection from \`${f.path}\` (lines ${lineA}-${lineB}):\n\`\`\`${lang}\n${selection}\n\`\`\``;
+    }
+    S.view = 'chat'; render();
+    startStream(pane, prompt, [], { tools: 'none' });
+  }
+  function finishSelectionEdit(pane) {
+    const pe = pane.pendingEdit; pane.pendingEdit = null; if (!pe) return;
+    const text = lastAssistantText(pane);
+    const m = text.match(/```replace[^\n]*\n([\s\S]*?)```/) || text.match(/```[^\n]*\n([\s\S]*?)```/);
+    if (!m) { toast('the model did not return a replacement block', true); return; }
+    const replacement = m[1].replace(/\n$/, '');
+    const f = S.drawer.file;
+    if (!f || f.path !== pe.path) { toast('the file changed; replacement not applied', true); return; }
+    showDiff(`Proposed change · ${pe.path}`, pe.selection, replacement, () => {
+      const idx = f.content.indexOf(pe.selection, Math.max(0, pe.start - 50));
+      const at = idx >= 0 ? idx : f.content.indexOf(pe.selection);
+      if (at < 0) return toast('could not find the original selection anymore', true);
+      f.content = f.content.slice(0, at) + replacement + f.content.slice(at + pe.selection.length);
+      S.drawer.open = true; S.drawer.tab = 'editor'; render(); toast('applied · Ctrl/⌘ S to save');
+    });
+  }
+  function lineDiff(a, b) {
+    const A = a.split('\n'), B = b.split('\n'); const n = Math.min(A.length, 400), m = Math.min(B.length, 400);
+    const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    const out = []; let i = 0, j = 0;
+    while (i < n && j < m) { if (A[i] === B[j]) { out.push(['eq', A[i]]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(['del', A[i++]]); else out.push(['add', B[j++]]); }
+    while (i < n) out.push(['del', A[i++]]); while (j < m) out.push(['add', B[j++]]);
+    return out;
+  }
+  function showDiff(title, before, after, onApply) {
+    const box = el('div', { class: 'diff' }); for (const [k, l] of lineDiff(before, after)) box.append(el('div', { class: k }, (k === 'add' ? '+ ' : k === 'del' ? '- ' : '  ') + l));
+    const m = modal({ title, body: box, wide: true, footer: [el('button', { class: 'btn', onclick: () => m.close() }, 'Discard'), el('button', { class: 'btn primary', onclick: () => { m.close(); onApply(); } }, I('check', 'sm'), 'Apply to editor')] });
+  }
+  // ---- artifacts tab
+  function renderArtifacts() {
+    const D = S.drawer;
+    if (!D.artifact || !S.artifacts[D.artifact]) {
+      const arts = allArtifacts();
+      const list = el('div', { class: 'alist' });
+      if (!arts.length) list.append(el('div', { class: 'empty' }, el('div', { class: 'big' }, '📦'), el('h3', {}, 'No artifacts yet'), el('div', {}, 'Long code blocks and HTML / SVG / Markdown documents the assistant writes show up here with a preview, copy and save.')));
+      for (const a of arts) list.append(el('div', { class: 'artifact' }, el('div', { class: 'ahead', onclick: () => openArtifact(a.id) }, el('div', { class: 'aicon' }, I(a.lang === 'html' || a.lang === 'svg' ? 'globe' : 'terminal', 'sm')), el('div', { style: 'min-width:0' }, el('div', { class: 'atitle truncate' }, a.name), el('div', { class: 'asub' }, `${a.lang || 'text'} · ${a.lines} lines${a.savedPath ? ' · saved ' + a.savedPath : ''}`)))));
+      return list;
+    }
+    const a = S.artifacts[D.artifact]; const view = el('div', { class: 'aview' });
+    const canPreview = PREVIEWABLE.includes(a.lang);
+    const swap = () => view.replaceWith(renderArtifacts());
+    const tabs = el('div', { class: 'tabs' }, ...(canPreview ? [el('button', { class: D.aTab === 'preview' ? 'active' : '', onclick: () => { D.aTab = 'preview'; swap(); } }, 'Preview')] : []), el('button', { class: D.aTab === 'code' || !canPreview ? 'active' : '', onclick: () => { D.aTab = 'code'; swap(); } }, 'Code'));
+    view.append(el('div', { class: 'ahead' }, el('button', { class: 'btn quiet icon sm', title: 'all artifacts', onclick: () => { D.artifact = null; swap(); } }, I('chevronR', 'sm')), el('span', { class: 'mono truncate', style: 'max-width:160px' }, a.name), el('span', { class: 'muted' }, `${a.lang || 'text'} · ${a.lines} lines`), el('span', { class: 'spacer' }), tabs, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(a.code).then(() => toast('copied')) }, I('copy', 'sm')), isAdmin() ? el('button', { class: 'btn primary sm', onclick: () => saveArtifact(a.id) }, I('download', 'sm'), a.savedPath ? 'Save again' : 'Save') : null, el('button', { class: 'btn sm', title: 'Open in the editor', onclick: () => { D.file = { path: a.savedPath || `artifacts/${a.name}`, content: a.code, saved: a.savedPath ? a.code : '', size: a.code.length }; D.tab = 'editor'; D.versions = null; redrawDrawer(); } }, I('edit', 'sm'))));
+    const body = el('div', { class: 'abody' });
+    if (canPreview && D.aTab !== 'code') {
+      if (a.lang === 'html') { const fr = el('iframe', { sandbox: 'allow-scripts', title: a.name }); fr.srcdoc = a.code; body.style.display = 'flex'; body.append(fr); }
+      else if (a.lang === 'svg') body.append(el('div', { style: 'padding:14px', html: DOMPurify.sanitize(a.code, { USE_PROFILES: { svg: true, svgFilters: true } }) }));
+      else if (a.lang === 'json') { let pretty = a.code; try { pretty = JSON.stringify(JSON.parse(a.code), null, 2); } catch {} body.append(el('pre', {}, pretty)); }
+      else body.append(el('div', { class: 'md', html: md(a.code) }));
+    } else body.append(el('pre', {}, a.code));
+    view.append(body);
+    return view;
+  }
 
   // ---------------------------------------------------------------- settings
   const SETTINGS_NAV = [
-    { grp: 'Models' }, { id: 'providers', label: 'Model providers', icon: 'cloud' }, { id: 'default', label: 'Default model', icon: 'box' },
-    { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
+    { grp: 'Models' }, { id: 'providers', label: 'Model providers', icon: 'cloud' }, { id: 'default', label: 'Defaults & presets', icon: 'box' },
+    { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'styles', label: 'Writing styles', icon: 'wand' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
     { grp: 'Studio' }, { id: 'audit', label: 'Audit log', icon: 'list' }, { id: 'general', label: 'General', icon: 'settings' },
   ];
   function renderSettings() {
@@ -422,7 +697,7 @@
     for (const n of SETTINGS_NAV) { if (n.grp) { nav.append(el('div', { class: 'grp' }, n.grp)); continue; } nav.append(el('button', { class: S.settingsPage === n.id ? 'active' : '', onclick: () => { S.settingsPage = n.id; render(); } }, I(n.icon, 'sm'), n.label)); }
     root.append(nav);
     const content = el('div', { class: 'scontent' }); root.append(content);
-    ({ providers: pageProviders, default: pageDefault, mcp: pageMcp, tools: pageTools, assistants: pageAssistants, agents: pageAgents, audit: pageAudit, general: pageGeneral }[S.settingsPage] || pageProviders)(content);
+    ({ providers: pageProviders, default: pageDefault, mcp: pageMcp, tools: pageTools, assistants: pageAssistants, styles: pageStyles, agents: pageAgents, audit: pageAudit, general: pageGeneral }[S.settingsPage] || pageProviders)(content);
     return root;
   }
   const page = (title, sub, ...kids) => el('div', { class: 'page' }, el('h1', {}, title, sub ? el('small', {}, sub) : null), ...kids);
@@ -457,7 +732,7 @@
     const addModel = el('input', { class: 'input', placeholder: 'add a model id manually', onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); const v = addModel.value.trim(); if (v) { models.unshift(v); draft.models = [...new Set([...(draft.models || []), v])]; if (!draft.default_model) draft.default_model = v; addModel.value = ''; renderModels(); } } } });
     card.append(el('div', { class: 'sect' }, `Models · ${models.length}`), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: async () => { try { const r = await api(`/api/providers/${encodeURIComponent(p.id)}/models`, { method: 'POST' }); toast(`${r.models.length} models`); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('refresh', 'sm'), p.kind === 'agentserver' ? 'Sync agents' : 'Discover models'), addModel), modelsBox);
     const adv = el('details', {}, el('summary', { class: 'muted', style: 'cursor:pointer' }, 'Advanced: extra request body, headers, label, TLS'));
-    adv.append(el('div', { class: 'grid2', style: 'margin-top:10px' }, field('Label', el('input', { class: 'input', value: p.label || '', oninput: (e) => { draft.label = e.target.value; } })), field('Allow self-signed TLS', switchEl(!!p.allow_insecure_tls, (v) => { draft.allow_insecure_tls = v; })), field('Extra body (JSON)', el('input', { class: 'input', value: Object.keys(p.extra_body || {}).length ? JSON.stringify(p.extra_body) : '', placeholder: '{"enable_thinking": false}', oninput: (e) => { draft._extra = e.target.value; } }), 'Merged into every request. Qwen/vLLM thinking switches live here.'), field('Headers (JSON)', el('input', { class: 'input', value: Object.keys(p.headers || {}).length ? JSON.stringify(p.headers) : '', placeholder: '{"X-Title": "missile"}', oninput: (e) => { draft._headers = e.target.value; } }))));
+    adv.append(el('div', { class: 'grid2', style: 'margin-top:10px' }, field('Label', el('input', { class: 'input', value: p.label || '', oninput: (e) => { draft.label = e.target.value; } })), field('Allow self-signed TLS', switchEl(!!p.allow_insecure_tls, (v) => { draft.allow_insecure_tls = v; })), field('Extra body (JSON)', el('input', { class: 'input', value: Object.keys(p.extra_body || {}).length ? JSON.stringify(p.extra_body) : '', placeholder: '{"enable_thinking": false}', oninput: (e) => { draft._extra = e.target.value; } }), 'Merged into every request. The thinking toggle in chat adds its own switch per request on top of this.'), field('Headers (JSON)', el('input', { class: 'input', value: Object.keys(p.headers || {}).length ? JSON.stringify(p.headers) : '', placeholder: '{"X-Title": "missile"}', oninput: (e) => { draft._headers = e.target.value; } }))));
     card.append(adv);
     card.append(el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: async () => { try { const body = { ...draft }; delete body._extra; delete body._headers; if (draft._extra !== undefined) body.extra_body = draft._extra ? JSON.parse(draft._extra) : {}; if (draft._headers !== undefined) body.headers = draft._headers ? JSON.parse(draft._headers) : {}; if (!body.api_key) delete body.api_key; if (!body.password) delete body.password; await api('/api/providers', { method: 'POST', body }); toast('saved'); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('check', 'sm'), 'Save'), el('button', { class: 'btn', onclick: async () => { await api('/api/default', { method: 'POST', body: { provider: p.id, model: draft.default_model || p.default_model } }); toast('default updated'); await loadState(); render(); } }, 'Use as default'), el('span', { class: 'spacer' }), el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(`Remove provider ${p.id}?`)) { await api('/api/providers/' + encodeURIComponent(p.id), { method: 'DELETE' }); S.sel.providerId = ''; await loadState(); render(); } } }, I('trash', 'sm'), 'Remove')));
     return card;
@@ -484,12 +759,27 @@
     sp.addEventListener('change', fillModels); fillModels();
     const sa = el('select', { class: 'select' }, ...S.st.assistants.map((a) => el('option', { value: a.id, selected: a.id === d.assistant }, a.name)));
     card.append(el('h3', {}, 'Defaults for new chats'), el('div', { class: 'grid2' }, field('Provider', sp), field('Model', sm)), field('Assistant', sa), el('div', {}, el('button', { class: 'btn primary', onclick: async () => { await api('/api/default', { method: 'POST', body: { provider: sp.value, model: sm.value, assistant: sa.value } }); toast('saved'); await loadState(); render(); } }, 'Save')));
-    content.append(page('Default model', 'used when a chat does not pick one', card));
+    const pc = el('div', { class: 'card' }, el('h3', {}, 'Quick presets', el('span', { class: 'chip' }, S.st.presets_configured ? 'custom' : 'derived from your providers')), el('div', { class: 'muted tiny' }, 'Shown at the top of the model picker. Thinking "default" keeps the provider as-is; on / max / off map to each provider\'s own switch (budgets, reasoning effort, enable_thinking).'));
+    const rows = (S.st.model_presets || []).map((p) => ({ ...p }));
+    const tbl = el('div', { style: 'display:grid;gap:8px' });
+    const renderRows = () => { tbl.innerHTML = ''; rows.forEach((r, i) => { const prov = el('select', { class: 'select', onchange: (e) => { r.provider = e.target.value; } }, ...S.st.providers.map((p) => el('option', { value: p.id, selected: p.id === r.provider }, p.label || p.id))); tbl.append(el('div', { class: 'row', style: 'flex-wrap:nowrap' }, el('input', { class: 'input', style: 'width:80px', value: r.id, oninput: (e) => { r.id = e.target.value.trim(); } }), el('input', { class: 'input', style: 'width:110px', value: r.label, oninput: (e) => { r.label = e.target.value; } }), prov, el('input', { class: 'input', value: r.model, placeholder: 'model id', oninput: (e) => { r.model = e.target.value.trim(); } }), el('select', { class: 'select', style: 'width:150px', onchange: (e) => { r.thinking = e.target.value; } }, ...['', 'off', 'on', 'max'].map((v) => el('option', { value: v, selected: v === (r.thinking || '') }, v || 'default'))), el('button', { class: 'btn quiet icon sm', onclick: () => { rows.splice(i, 1); renderRows(); } }, I('x', 'sm')))); }); };
+    renderRows();
+    pc.append(tbl, el('div', { class: 'row' }, el('button', { class: 'btn sm', onclick: () => { rows.push({ id: `p${rows.length + 1}`, label: 'Preset', provider: S.st.providers[0]?.id || '', model: '', thinking: '' }); renderRows(); } }, I('plus', 'sm'), 'Add preset'), el('span', { class: 'spacer' }), el('button', { class: 'btn', onclick: async () => { await api('/api/presets', { method: 'PUT', body: [] }); toast('back to derived presets'); await loadState(); render(); } }, 'Reset'), el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/presets', { method: 'PUT', body: rows }); toast('presets saved'); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, 'Save presets')));
+    content.append(page('Defaults & presets', 'what new chats use, and the quick picks', card, pc));
+  }
+  function pageStyles(content) {
+    const list = el('div', { class: 'listbox' });
+    const styles = S.st.styles || []; const sel = S.sel.newStyle ? null : (styles.some((s) => s.id === S.sel.styleId) ? S.sel.styleId : styles[0]?.id);
+    list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: () => { S.sel.newStyle = true; render(); } }, I('plus', 'sm'), 'New style')));
+    for (const s of styles) list.append(el('div', { class: 'lrow' + (s.id === sel ? ' active' : ''), onclick: () => { S.sel.newStyle = false; S.sel.styleId = s.id; render(); } }, el('div', { class: 'em', style: 'background:var(--bg-subtle);color:var(--fg)' }, I('wand', 'sm')), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, s.name), el('div', { class: 'sub truncate' }, s.prompt || 'no extra instructions'))));
+    const s = sel ? styles.find((x) => x.id === sel) : { id: '', name: '', prompt: '' }; const d = { ...s };
+    const card = el('div', { class: 'card' }, el('h3', {}, sel ? `Edit ${s.name}` : 'New style'), el('div', { class: 'grid2' }, field('Id', el('input', { class: 'input', value: d.id, disabled: !!sel, oninput: (e) => { d.id = e.target.value.trim(); } })), field('Name', el('input', { class: 'input', value: d.name, oninput: (e) => { d.name = e.target.value; } }))), field('Instructions', el('textarea', { class: 'textarea', style: 'min-height:140px', value: d.prompt || '', placeholder: 'How should answers sound? Paste a sample of your own writing and say "write like this".', oninput: (e) => { d.prompt = e.target.value; } }), 'Appended to the system prompt as "Writing style: …". Chat-level instructions still win.'), el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/styles', { method: 'POST', body: d }); toast('saved'); S.sel.newStyle = false; S.sel.styleId = d.id; await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('check', 'sm'), 'Save'), el('span', { class: 'spacer' }), sel && sel !== 'normal' ? el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(`Delete style ${s.name}?`)) { await api('/api/styles/' + sel, { method: 'DELETE' }); S.sel.styleId = ''; await loadState(); render(); } } }, I('trash', 'sm'), 'Delete') : null));
+    content.append(page('Writing styles', 'tone presets you can switch per chat without changing the assistant', el('div', { class: 'split' }, list, card)));
   }
   function pageMcp(content) {
     const list = el('div', { class: 'listbox' });
     const names = S.st.mcp.map((s) => s.name); const selName = names.includes(S.sel.mcpName) ? S.sel.mcpName : names[0];
-    list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'flex:1', onclick: () => mcpModal() }, I('plus', 'sm'), 'Add server'), el('button', { class: 'btn sm', onclick: importModal, title: 'Import from Claude Code, Cursor, …' }, I('download', 'sm'))));
+    list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'flex:1', onclick: () => mcpModal() }, I('plus', 'sm'), 'Add server'), el('button', { class: 'btn sm', onclick: importModal, title: 'Import from other MCP clients' }, I('download', 'sm'))));
     for (const s of S.st.mcp) list.append(el('div', { class: 'lrow' + (s.name === selName ? ' active' : ''), onclick: () => { S.sel.mcpName = s.name; render(); } }, el('span', { class: 'dot ' + (s.status === 'connected' ? 'ok' : s.status === 'failed' ? 'err' : s.status === 'connecting' ? 'warn' : '') }), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, s.name), el('div', { class: 'sub truncate' }, `${s.status} · ${s.tool_count} tools · ${s.config.transport}`))));
     if (!S.st.mcp.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px' }, 'No MCP servers yet.'));
     const s = S.st.mcp.find((x) => x.name === selName);
@@ -505,7 +795,7 @@
       card.append(el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => mcpModal(s.name, c) }, I('edit', 'sm'), 'Edit'), el('button', { class: 'btn', onclick: async () => { await api(`/api/mcp/${encodeURIComponent(s.name)}/restart`, { method: 'POST' }); toast('restarting'); setTimeout(async () => { await loadState(); render(); }, 1500); } }, I('refresh', 'sm'), 'Restart'), el('span', { class: 'spacer' }), el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(`Remove ${s.name}?`)) { await api('/api/mcp/' + encodeURIComponent(s.name), { method: 'DELETE' }); S.sel.mcpName = ''; await loadState(); render(); } } }, I('trash', 'sm'), 'Remove')));
       card.append(el('div', { class: 'muted tiny' }, 'Use this studio from other MCP clients: add a stdio server with command ', el('code', {}, 'ms'), ' and args ', el('code', {}, 'hub'), '. Export the standard JSON at ', el('a', { href: '/api/mcp/export', target: '_blank' }, '/api/mcp/export'), '.'));
       detail.append(card);
-    } else detail.append(el('div', { class: 'card' }, el('h3', {}, 'Add your first MCP server'), el('p', { class: 'muted', style: 'margin:0' }, 'stdio commands (npx / uvx / python …), Streamable HTTP or SSE URLs. Or import the servers you already use in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code or Cherry Studio.'), el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: () => mcpModal() }, I('plus', 'sm'), 'Add server'), el('button', { class: 'btn', onclick: importModal }, I('download', 'sm'), 'Import'))));
+    } else detail.append(el('div', { class: 'card' }, el('h3', {}, 'Add your first MCP server'), el('p', { class: 'muted', style: 'margin:0' }, 'stdio commands (npx / uvx / python …), Streamable HTTP or SSE URLs. Or import the servers you already use in other MCP clients on this machine.'), el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: () => mcpModal() }, I('plus', 'sm'), 'Add server'), el('button', { class: 'btn', onclick: importModal }, I('download', 'sm'), 'Import'))));
     content.append(page('MCP servers', 'tools from your machine and the network', el('div', { class: 'split' }, list, detail)));
   }
   const kv = (txt) => Object.fromEntries(txt.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim()]; }));
@@ -541,7 +831,7 @@
   function pageAssistants(content) {
     const list = el('div', { class: 'listbox' });
     const ids = S.st.assistants.map((a) => a.id);
-    let sel = S.sel.newAssistant ? null : (ids.includes(S.sel.assistantId) ? S.sel.assistantId : ids[0]);
+    const sel = S.sel.newAssistant ? null : (ids.includes(S.sel.assistantId) ? S.sel.assistantId : ids[0]);
     list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: () => { S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), 'New assistant')));
     for (const a of S.st.assistants) list.append(el('div', { class: 'lrow' + (a.id === sel ? ' active' : ''), onclick: () => { S.sel.newAssistant = false; S.sel.assistantId = a.id; render(); } }, el('div', { class: 'em', style: 'background:var(--bg-subtle);color:var(--fg);font-size:16px' }, a.emoji || '🤖'), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, a.name), el('div', { class: 'sub truncate' }, a.model ? `${a.provider || 'default'} / ${shortModel(a.model)}` : 'default model')), S.st.default.assistant === a.id ? el('span', { class: 'chip primary' }, 'default') : null));
     const a = sel ? assistantOf(sel) : { id: '', name: '', emoji: '🤖', system_prompt: '', provider: '', model: '', tools: 'all', max_iterations: 25 };
@@ -579,9 +869,9 @@
   function pageGeneral(content) {
     const st = S.st;
     content.append(page('General', 'this studio', el('div', { class: 'card' }, el('h3', {}, 'Server'), el('div', { class: 'grid2' }, field('Version', el('div', {}, 'missile-studio ' + st.version)), field('Bound to', el('div', {}, `${st.server.host}:${st.server.port}` + (st.server.auth_required ? ' · token required' : ' · loopback, no token'))), field('Config file', el('code', {}, st.config_path)), field('Data folder', el('code', {}, st.home))), el('div', { class: 'muted tiny' }, 'Change host/port/token with ', el('code', {}, 'ms serve --host 0.0.0.0 --port 7700 --token …'), ' or ', el('code', {}, 'ms config set-token …'), '. The admin console at ', el('a', { href: '/admin', target: '_blank' }, '/admin'), ' manages tokens, logs, retention and system status.')),
-      el('div', { class: 'card' }, el('h3', {}, 'Appearance'), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => { document.documentElement.setAttribute('data-theme', 'light'); localStorage.setItem('missile_theme', 'light'); render(); } }, I('sun', 'sm'), 'Light'), el('button', { class: 'btn', onclick: () => { document.documentElement.setAttribute('data-theme', 'dark'); localStorage.setItem('missile_theme', 'dark'); render(); } }, I('moon', 'sm'), 'Dark'), el('button', { class: 'btn', onclick: () => { document.documentElement.removeAttribute('data-theme'); localStorage.removeItem('missile_theme'); render(); } }, 'System'))),
-      el('div', { class: 'card' }, el('h3', {}, 'Keyboard'), el('div', { class: 'md', html: md('- `Ctrl/⌘ K` new chat in the active pane\n- `Ctrl/⌘ \\` split the view (up to 3 panes), `Ctrl/⌘ Shift W` close the active pane\n- `Ctrl/⌘ J` toggle the workspace drawer (files · editor · terminal), `Ctrl/⌘ S` saves the open file\n- `Ctrl/⌘ ,` settings') })),
-      el('div', { class: 'card' }, el('h3', {}, 'Use this studio elsewhere'), el('div', { class: 'md', html: md('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for Claude Code, Cursor, Claude Desktop: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)') }))));
+      el('div', { class: 'card' }, el('h3', {}, 'Appearance'), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => theme.set('light') }, I('sun', 'sm'), 'Light'), el('button', { class: 'btn', onclick: () => theme.set('dark') }, I('moon', 'sm'), 'Dark'), el('button', { class: 'btn', onclick: () => theme.set('warm') }, I('sparkles', 'sm'), 'Warm'), el('button', { class: 'btn', onclick: () => theme.set('') }, 'System')), el('div', { class: 'muted tiny' }, 'Warm: cream paper, terracotta accents, serif headings.')),
+      el('div', { class: 'card' }, el('h3', {}, 'Keyboard'), el('div', {}, el('button', { class: 'btn', onclick: openShortcuts }, I('info', 'sm'), 'Show all shortcuts (Ctrl/⌘ /)'))),
+      el('div', { class: 'card' }, el('h3', {}, 'Use this studio elsewhere'), el('div', { class: 'md', html: md('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for other MCP clients: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)') }))));
   }
 
   // ---------------------------------------------------------------- boot
@@ -593,12 +883,19 @@
     render();
     setInterval(async () => { if (S.view.startsWith('settings') && (S.settingsPage === 'mcp' || S.settingsPage === 'agents')) { try { await loadState(); } catch {} } }, 6000);
     document.addEventListener('keydown', (e) => {
-      const mod = e.ctrlKey || e.metaKey; if (!mod) return;
-      if (e.key.toLowerCase() === 'k') { e.preventDefault(); newConv(activePane()); }
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === 'Escape' && e.shiftKey) { e.preventDefault(); $('.composerInput', paneEl(activePane()))?.focus(); return; }
+      if (!mod) return;
+      const k = e.key.toLowerCase();
+      if (k === 'k') { e.preventDefault(); openPalette(); }
+      else if (k === 'o' && e.shiftKey) { e.preventDefault(); newConv(activePane()); }
       else if (e.key === ',') { e.preventDefault(); S.view = 'settings'; render(); }
-      else if (e.key === '\\') { e.preventDefault(); if (S.panes.length < MAX_PANES) { const np = newPane(); np.sel = { ...activePane().sel }; S.panes.splice(S.active + 1, 0, np); S.active += 1; S.view = 'chat'; render(); } }
-      else if (e.key.toLowerCase() === 'w' && e.shiftKey) { e.preventDefault(); if (S.panes.length > 1) { S.panes.splice(S.active, 1); S.active = Math.min(S.active, S.panes.length - 1); render(); } }
-      else if (e.key.toLowerCase() === 'j') { e.preventDefault(); S.drawer.open = !S.drawer.open; S.view = 'chat'; render(); if (S.drawer.open) loadTree(S.drawer.path); }
+      else if (e.key === '/') { e.preventDefault(); openShortcuts(); }
+      else if (e.key === '\\') { e.preventDefault(); splitPane(S.active); }
+      else if (k === 'w' && e.shiftKey) { e.preventDefault(); closePane(S.active); }
+      else if (k === 'j') { e.preventDefault(); if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }
+      else if (k === 'c' && e.shiftKey) { e.preventDefault(); const t = lastAssistantText(activePane()); if (t) navigator.clipboard.writeText(t).then(() => toast('last answer copied')); }
+      else if (e.key === ';' && e.shiftKey) { e.preventDefault(); const t = lastAssistantText(activePane()); const m = [...t.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].pop(); if (m) navigator.clipboard.writeText(m[1]).then(() => toast('last code block copied')); else toast('no code block in the last answer', true); }
     });
   }
   boot();

@@ -96,6 +96,7 @@ class Store:
         self._local = threading.local()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -106,6 +107,26 @@ class Store:
             conn.execute("PRAGMA foreign_keys=ON")
             self._local.conn = conn
         return conn
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced after 0.1 (branching, styles). Idempotent."""
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "parent_id" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "head_id" not in cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN head_id TEXT")
+        if "style_id" not in cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN style_id TEXT NOT NULL DEFAULT ''")
+        # legacy linear conversations: chain by seq and point head at the last message
+        for row in conn.execute("SELECT id FROM conversations WHERE head_id IS NULL").fetchall():
+            ids = [r[0] for r in conn.execute("SELECT id FROM messages WHERE conversation_id=? ORDER BY seq", (row[0],)).fetchall()]
+            prev = None
+            for mid in ids:
+                conn.execute("UPDATE messages SET parent_id=? WHERE id=?", (prev, mid))
+                prev = mid
+            if prev:
+                conn.execute("UPDATE conversations SET head_id=? WHERE id=?", (prev, row[0]))
 
     # ---- conversations
     def create_conversation(self, *, title: str = "", assistant_id: str = "default", provider_id: str = "", model: str = "") -> dict:
@@ -151,28 +172,81 @@ class Store:
         self._conn().execute("DELETE FROM conversations WHERE id=?", (cid,))
 
     # ---- messages
-    def append_message(self, cid: str, message: dict) -> str:
+    def append_message(self, cid: str, message: dict, parent_id: Any = "__head__") -> str:
+        """Append a message. By default it hangs off the conversation head and becomes the new head."""
         conn = self._conn()
+        if parent_id == "__head__":
+            row = conn.execute("SELECT head_id FROM conversations WHERE id=?", (cid,)).fetchone()
+            parent_id = (row["head_id"] or None) if row else None
         seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE conversation_id=?", (cid,)).fetchone()[0]
         mid = message.get("id") or uuid.uuid4().hex[:16]
         body = {k: v for k, v in message.items() if k != "id"}
         conn.execute(
-            "INSERT INTO messages(id,conversation_id,seq,role,content,created_at) VALUES (?,?,?,?,?,?)",
-            (mid, cid, seq, message.get("role", "user"), json.dumps(body, ensure_ascii=False), time.time()),
+            "INSERT INTO messages(id,conversation_id,seq,role,content,created_at,parent_id) VALUES (?,?,?,?,?,?,?)",
+            (mid, cid, seq, message.get("role", "user"), json.dumps(body, ensure_ascii=False), time.time(), parent_id),
         )
-        conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (time.time(), cid))
+        conn.execute("UPDATE conversations SET updated_at=?, head_id=? WHERE id=?", (time.time(), mid, cid))
         return mid
 
+    def _rows(self, cid: str) -> dict[str, sqlite3.Row]:
+        return {r["id"]: r for r in self._conn().execute("SELECT id, parent_id, seq, created_at, content FROM messages WHERE conversation_id=? ORDER BY seq", (cid,)).fetchall()}
+
     def get_messages(self, cid: str) -> list[dict]:
-        rows = self._conn().execute(
-            "SELECT id, content FROM messages WHERE conversation_id=? ORDER BY seq", (cid,)
-        ).fetchall()
-        out = []
-        for r in rows:
+        """The visible thread: root -> head (other branches are hidden)."""
+        conn = self._conn()
+        conv = conn.execute("SELECT head_id FROM conversations WHERE id=?", (cid,)).fetchone()
+        rows = self._rows(cid)
+        if not rows:
+            return []
+        head = conv["head_id"] if conv else None
+        if head == "":
+            return []  # head rewound to the root: the next message starts a sibling branch at the top
+        if not head or head not in rows:
+            head = max(rows.values(), key=lambda r: r["seq"])["id"]
+        path: list[dict] = []
+        cur = head
+        seen = set()
+        while cur and cur in rows and cur not in seen:
+            seen.add(cur)
+            r = rows[cur]
             m = json.loads(r["content"])
             m["id"] = r["id"]
-            out.append(m)
+            m["parent_id"] = r["parent_id"]
+            path.append(m)
+            cur = r["parent_id"]
+        path.reverse()
+        return path
+
+    def branch_info(self, cid: str, path: list[dict]) -> dict[str, dict]:
+        """For each message on the path: its siblings (same parent) and its index among them."""
+        rows = self._rows(cid)
+        by_parent: dict[Any, list[str]] = {}
+        for r in sorted(rows.values(), key=lambda r: r["seq"]):
+            by_parent.setdefault(r["parent_id"], []).append(r["id"])
+        out = {}
+        for m in path:
+            sibs = by_parent.get(m.get("parent_id"), [m["id"]])
+            if len(sibs) > 1:
+                out[m["id"]] = {"siblings": sibs, "index": sibs.index(m["id"]) if m["id"] in sibs else 0}
         return out
+
+    def leaf_of(self, cid: str, message_id: str) -> str:
+        """Follow the most recent child chain down from a message."""
+        rows = self._rows(cid)
+        cur = message_id
+        while True:
+            kids = [r for r in rows.values() if r["parent_id"] == cur]
+            if not kids:
+                return cur
+            cur = max(kids, key=lambda r: r["seq"])["id"]
+
+    def set_head(self, cid: str, message_id) -> None:
+        """Point the visible thread at a message. None means the root ("" is stored so it is not mistaken for a legacy row)."""
+        self._conn().execute("UPDATE conversations SET head_id=? WHERE id=?", (message_id or "", cid))
+
+    def parent_of(self, cid: str, message_id: str):
+        row = self._conn().execute("SELECT parent_id FROM messages WHERE id=? AND conversation_id=?", (message_id, cid)).fetchone()
+        return row["parent_id"] if row else None
 
     def truncate_after(self, cid: str, message_id: str) -> None:
         conn = self._conn()

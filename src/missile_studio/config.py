@@ -133,6 +133,31 @@ class BuiltinTools(BaseModel):
         return home_dir() / "workspace"
 
 
+class ModelPreset(BaseModel):
+    """Quick picks shown at the top of the model picker (fast / think / best)."""
+
+    id: str
+    label: str
+    provider: str = ""
+    model: str = ""
+    thinking: str = ""  # "" (provider default) | off | on | max
+
+
+class StyleConfig(BaseModel):
+    id: str
+    name: str
+    prompt: str = ""
+
+
+DEFAULT_STYLES: list[dict] = [
+    {"id": "normal", "name": "Normal", "prompt": ""},
+    {"id": "concise", "name": "Concise", "prompt": "Answer as briefly as possible. No preamble, no recap. Prefer short sentences and lists."},
+    {"id": "explanatory", "name": "Explanatory", "prompt": "Explain the reasoning and the trade-offs. Add a short example when it helps. Define terms the first time."},
+    {"id": "formal", "name": "Formal", "prompt": "Use a formal, precise register suitable for documentation or a report. No jokes, no emoji."},
+    {"id": "friendly", "name": "Friendly", "prompt": "Warm, conversational tone, like a helpful colleague. Keep it light but accurate."},
+]
+
+
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = DEFAULT_PORT
@@ -154,6 +179,8 @@ class Config(BaseModel):
     tool_policy: ToolPolicy = Field(default_factory=ToolPolicy)
     assistants: list[AssistantConfig] = Field(default_factory=list)
     builtin_tools: BuiltinTools = Field(default_factory=BuiltinTools)
+    presets: list[ModelPreset] = Field(default_factory=list)
+    styles: list[StyleConfig] = Field(default_factory=list)
 
     # ---- helpers
     def provider(self, pid: str) -> Optional[ProviderConfig]:
@@ -168,7 +195,31 @@ class Config(BaseModel):
                 return a
         return None
 
+    def style(self, sid: str) -> Optional[StyleConfig]:
+        for st in self.styles:
+            if st.id == sid:
+                return st
+        return None
+
+    def effective_presets(self) -> list[ModelPreset]:
+        """Configured presets, or sensible ones derived from the providers."""
+        if self.presets:
+            return self.presets
+        if not self.providers:
+            return []
+        dp = self.provider(self.default.provider) or self.providers[0]
+        dm = self.default.model if self.default.provider == dp.id else (dp.default_model or (dp.models[0] if dp.models else ""))
+        best = next((p for p in self.providers if p.kind == "anthropic" and p.enabled), None) or dp
+        bm = best.default_model or (best.models[0] if best.models else dm)
+        return [
+            ModelPreset(id="fast", label="Fast", provider=dp.id, model=dm, thinking="off"),
+            ModelPreset(id="think", label="Think", provider=dp.id, model=dm, thinking="on"),
+            ModelPreset(id="best", label="Best", provider=best.id, model=bm, thinking="max"),
+        ]
+
     def ensure_defaults(self) -> None:
+        if not self.styles:
+            self.styles = [StyleConfig(**d) for d in DEFAULT_STYLES]
         if not self.assistants:
             self.assistants.append(
                 AssistantConfig(

@@ -22,9 +22,20 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
 **Chat.** Icon rail, chat list grouped by day, one conversation in the middle. Assistant and model are
 pills in the top bar, so you can switch mid-conversation. Every tool call is a collapsible card inside
 the answer: name, arguments, result, policy decision and duration. Markdown, code blocks with copy,
-thinking blocks, token usage. Light and dark themes.
+thinking blocks, token usage. Edit any of your messages and resend: the chat forks, a small
+`‹ 1 / 2 ›` under the message switches between versions, and *Retry* forks the answer the same way.
+A writing style (Normal, Concise, Explanatory, Formal, Friendly, or your own) can be set per chat.
+Light, dark and warm themes.
 
 ![chat](docs/screenshots/chat.png)
+
+**Model picker · presets · thinking.** The model pill opens with three quick picks, *Fast / Think / Best*,
+derived from your providers (or set your own in Settings → Defaults & presets), then every model of every
+provider with search. The brain button cycles thinking per chat (provider default → on → max → off);
+each provider gets its own switch underneath (budgets, reasoning effort, `enable_thinking`), so one
+toggle works everywhere.
+
+![picker](docs/screenshots/picker.png)
 
 **Approvals.** When a tool is `ask`-level (destructive hint, dangerous shell pattern, or your rule) the turn
 pauses and a card appears in the flow: *Allow once · Allow for this chat · Always allow · Deny*. The same
@@ -57,6 +68,26 @@ ask the active chat about the open file, and run commands in the server-side she
 need the admin role and land in the audit log.
 
 ![workspace](docs/screenshots/workspace.png)
+
+**Artifacts.** Long code blocks and HTML / SVG / Markdown / JSON documents in an answer become cards.
+Open one in the drawer for a live sandboxed preview or the code, copy it, save it into the workspace
+(previous versions are kept), or send it to the editor.
+
+![artifacts](docs/screenshots/artifacts.png)
+
+**Editor · edit a selection with the model.** Select text in the editor and a small bar appears: type an
+instruction, or *Fix / Comment / Explain / Review*. Replacements come back as a diff you apply or
+discard. Every save keeps the previous version; *Versions* lists them and shows the diff before you
+restore one.
+
+![editor](docs/screenshots/editor.png)
+
+**Search & commands.** `Ctrl/⌘ K` searches chats, runs any command (new chat, split, drawer, theme,
+settings pages) or asks a question straight away. `/` at the start of the message box lists slash
+commands (`/new /split /files /terminal /artifacts /tools /think /style /assistant /tool …`).
+`Ctrl/⌘ /` shows every shortcut. A long paste becomes an attached file instead of a wall of text.
+
+![palette](docs/screenshots/palette.png)
 
 **Admin console (`/admin`).** A separate, password-protected console: dashboard with warnings and
 24h activity, providers & MCP health with test/restart, access tokens with scopes, typed settings that
@@ -109,9 +140,12 @@ the file with `--api-key-env OPENAI_API_KEY`.
 | **MCP client** | stdio / streamable-http / sse servers, one supervised connection each (ping, backoff reconnect, per-call timeout, stderr logs). Tool names are `server__tool`. Import from Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Cherry Studio or pasted JSON. Export back as standard `mcpServers` JSON. |
 | **Local tools** | `local__run_shell`, `read_file`, `write_file`, `list_dir`, `search_files`, `fetch_url`, `now`. Sandboxed to a workspace folder (symlink-safe). |
 | **Policy & approvals** | Per-tool `allow / ask / block` (globs like `fs__*`), read-only tools allowed by default, destructive hints and dangerous shell commands (`rm -rf`, `git push --force`, `curl | sh` ...) always ask. Approve once / for this chat / always, in the browser or in the terminal. Every call lands in an **audit log**. |
-| **Assistants** | System prompt + preferred provider/model + tool set + iteration cap. |
-| **Conversations** | SQLite, resumable, attachments (text/code/markdown/pdf*/images), markdown rendering, thinking blocks, tool cards. Many chats can run at once; split the view into up to three panes and link their inputs to compare models. |
-| **Workspace** | IDE-style drawer over the local-tools folder: file tree, editor with save, terminal (server-side shell, admin only, audited). |
+| **Models & presets** | Quick picks *Fast / Think / Best* at the top of the model picker, derived from your providers or configured in Settings → Defaults & presets. A per-chat thinking toggle (default / on / max / off) mapped to each provider's own switch: Anthropic budgets, reasoning effort on reasoning models, `enable_thinking` for Qwen-style servers, Gemini thinking budgets. |
+| **Assistants & styles** | Assistants: system prompt + preferred provider/model + tool set + iteration cap. Writing styles (Normal, Concise, Explanatory, Formal, Friendly, or your own) switch the tone per chat without touching the assistant. |
+| **Conversations** | SQLite, resumable, attachments (text/code/markdown/pdf*/images), markdown rendering, thinking blocks, tool cards. Edit a message to fork the chat; every branch is kept and `‹ ›` switches between them; retry forks the answer. Many chats can run at once; split the view into up to three panes and link their inputs to compare models. |
+| **Artifacts** | Long code blocks and HTML / SVG / Markdown / JSON documents become cards with a sandboxed live preview, copy, save to the workspace and open-in-editor. |
+| **Workspace** | IDE-style drawer over the local-tools folder: file tree, editor with save, selection editing through the model (instruction or Fix / Comment / Explain / Review, applied as a diff), saved versions with diff, terminal (server-side shell, admin only, audited). |
+| **Keyboard** | `Ctrl/⌘ K` palette (chats, commands, ask), `/` slash commands in the composer, `Ctrl/⌘ /` shortcut sheet, `Ctrl/⌘ \` split, `Ctrl/⌘ J` drawer, copy last answer / last code block, long paste → attached file. |
 | **Hub** | `ms hub` exposes *everything* (local tools + all MCP servers) as **one** MCP server over stdio or HTTP. Point Claude Code, Cursor or Claude Desktop at it. |
 | **Agent servers** | Chat with agents hosted on a remote agent platform (login, agent list, SSE stream, server-side tool events). `ms bridge` registers this machine as a device on that platform, so its agents can call your local tools and MCP servers through missile's policy. |
 | **Admin console** | `/admin`: username/password sessions, dashboard (warnings, 24h chart, top tools, model usage), chats browser, access tokens with `chat` / `admin` scopes, typed settings (maintenance mode, policy defaults, retention, token rotation), event log, system status, log tails, retention and vacuum. `ms admin …` manages users and tokens from the shell. |
@@ -147,8 +181,8 @@ Details in [docs/GUIDE-agent-server.md](docs/GUIDE-agent-server.md).
 
 ```
 src/missile_studio/
-  config.py          config.json model (providers, mcp_servers, policy, assistants, server)
-  store.py           SQLite: conversations, messages, tool audit
+  config.py          config.json model (providers, mcp_servers, policy, assistants, presets, styles, server)
+  store.py           SQLite: conversations, message tree (branches), tool audit
   providers/         base contract + openai_compat / anthropic / gemini / agentserver adapters
   mcp/manager.py     supervised MCP connections, namespaced catalog, call_tool
   mcp/importers.py   read other clients' MCP configs
