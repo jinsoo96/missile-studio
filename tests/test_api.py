@@ -52,7 +52,7 @@ def test_auth_required(client):
     r = client.post("/api/login", json={"token": "tok"})
     assert r.status_code == 200 and "missile_token" in r.cookies
     assert client.get("/api/state", headers=H).status_code == 200
-    assert client.get("/").status_code == 200 and "missile-studio" in client.get("/").text
+    assert client.get("/").status_code == 200 and "<title>missile studio</title>" in client.get("/").text
 
 
 def test_state_masks_secrets_and_lists_tools(client):
