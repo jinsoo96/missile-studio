@@ -384,6 +384,7 @@
           if (mm.role === 'assistant') {
             if (mm.thinking) content.append(el('details', { class: 'think' }, el('summary', {}, I('brain', 'sm'), 'Thinking'), el('div', { class: 'tbody' }, mm.thinking)));
             if (mm.content) { const mdEl = el('div', { class: 'md', html: md(mm.content) }); artifactize(mdEl, mm.id, pane.convId); content.append(mdEl); lastText = mm.content; }
+            if (mm.meta?.error_text) content.append(el('div', { class: 'error-line' }, mm.meta.error_text, /401|credential|api key|unauthorized/i.test(mm.meta.error_text) ? el('button', { class: 'btn sm', style: 'margin-left:10px', onclick: () => { S.view = 'settings'; S.settingsPage = 'providers'; S.sel.providerId = pane.conv?.provider_id || ''; render(); } }, 'Open provider settings') : null));
             for (const c of mm.tool_calls || []) content.append(toolCard(c, toolResults[c.id], !!live));
             if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage;
           }
@@ -494,6 +495,9 @@
   async function startStream(pane, text, atts, opts = {}) {
     const t = targetOf(pane); if (!t.pid) return toast('Add a provider first (Settings → Model providers)', true);
     if (pane.convId && S.live[pane.convId]) return toast('this chat is still answering; open a new pane to run another', true);
+    // a hosted provider without a saved key almost always answers 401: say so once, but still send (gateways and local servers need none)
+    S.warnedNoKey = S.warnedNoKey || {};
+    if (t.provider && t.provider.has_key === false && t.provider.kind !== 'agentserver' && !/127\.0\.0\.1|localhost|\[::1\]|\.local\b|^http:\/\/(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(t.provider.base_url || '') && !S.warnedNoKey[t.pid]) { S.warnedNoKey[t.pid] = true; toast(`${t.provider.label || t.pid} has no API key saved. If this fails with 401, add one in Settings → Model providers.`, true); }
     if (!pane.conv) { try { pane.conv = await api('/api/conversations', { method: 'POST', body: { assistant_id: t.aid, provider_id: t.pid, model: t.model } }); } catch (e) { return toast(e.message, true); } pane.convId = pane.conv.id; pane.messages = []; pane.branches = {}; await loadConvs(); }
     const convId = pane.convId;
     if (opts.branchFrom) { const idx = pane.messages.findIndex((m) => m.id === opts.branchFrom); if (idx >= 0) pane.messages = pane.messages.slice(0, idx); }

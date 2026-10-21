@@ -183,3 +183,23 @@ def test_has_key_reflects_a_resolvable_key(client, monkeypatch):
     p = next(p for p in client.get("/api/providers", headers=H).json() if p["id"] == "envp")
     assert p["has_key"] is True
     client.delete("/api/providers/envp", headers=H)
+
+
+def test_failed_first_turn_is_kept_and_skipped_in_history(client):
+    """A provider error before any text (e.g. 401 without a key) is stored on the turn, shown to the user, and not replayed to the model."""
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    FakeProvider.script = [
+        [{"type": "error", "message": "HTTP 401 from openrouter.ai: No cookie auth credentials found"}, {"type": "done", "finish_reason": "error"}],
+        [{"type": "text_delta", "text": "hello"}, {"type": "done", "finish_reason": "stop"}],
+    ]
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "hi"}, headers=H) as resp:
+        events = read_sse(resp)
+    assert any(e["type"] == "error" and "401" in e["message"] for e in events)
+    msgs = client.get(f"/api/conversations/{conv['id']}", headers=H).json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[1]["content"] == "" and msgs[1]["meta"]["error"] is True and "401" in msgs[1]["meta"]["error_text"]
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "again"}, headers=H) as resp:
+        events = read_sse(resp)
+    assert events[-1]["finish_reason"] == "stop"
+    # the empty failed turn is not part of what the provider receives
+    assert [m["role"] for m in FakeProvider.seen[-1]] == ["system", "user", "user"]

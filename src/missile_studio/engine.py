@@ -341,6 +341,7 @@ class Engine:
                 think_parts: list[str] = []
                 calls: list[dict] = []
                 had_error = False
+                error_text = ""
                 usage: Optional[dict] = None
                 t_iter = time.time()
                 async for ev in provider.stream(model, messages, llm_tools, options):
@@ -356,6 +357,7 @@ class Engine:
                         yield ev
                     elif et == "error":
                         had_error = True
+                        error_text = str(ev.get("message", ""))[:600]
                         yield ev
                     elif et == "done":
                         finish = ev.get("finish_reason", "stop")
@@ -374,7 +376,10 @@ class Engine:
                     assistant_msg["meta"]["usage"] = usage
                 if had_error:
                     assistant_msg["meta"]["error"] = True
-                if assistant_msg["content"] or calls or think_parts:
+                    assistant_msg["meta"]["error_text"] = error_text or "the model returned an error"
+                if assistant_msg["content"] or calls or think_parts or had_error:
+                    # a turn that failed before any text is stored too, so the error stays visible after a reload
+                    # (an empty assistant message is dropped from provider history by _repair_history)
                     self.store.append_message(req.conversation_id, assistant_msg)
                     yield {"type": "message", "message": assistant_msg}
                 messages.append(_strip(assistant_msg))
@@ -471,8 +476,10 @@ def _repair_history(history: list[dict]) -> list[dict]:
     i = 0
     while i < len(history):
         m = history[i]
-        out.append(m)
         i += 1
+        if m.get("role") == "assistant" and not m.get("content") and not m.get("tool_calls"):
+            continue  # a failed turn with no text: providers reject empty assistant content
+        out.append(m)
         if m.get("role") == "assistant" and m.get("tool_calls"):
             answered: set = set()
             while i < len(history) and history[i].get("role") == "tool":
