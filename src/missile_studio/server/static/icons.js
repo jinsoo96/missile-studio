@@ -56,11 +56,8 @@ window.icon = function (name, cls) {
   s.innerHTML = window.ICONS[name] || window.ICONS.info;
   return s;
 };
-/* The studio mark: an abstract upward chevron on a cyan→violet→pink gradient tile (no emoji). Returns SVG markup. */
+/* The studio mark: the owner's avatar (static/brand/avatar.png, replace the file to rebrand). Returns <img> markup; CSS rounds it. */
 window.logoMark = function (size) {
   size = size || 32;
-  return '<svg class="mark" width="' + size + '" height="' + size + '" viewBox="0 0 32 32" aria-hidden="true">'
-    + '<defs><linearGradient id="msmark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs>'
-    + '<rect x="1.5" y="1.5" width="29" height="29" rx="9" fill="url(#msmark)"/>'
-    + '<path d="M9.5 21.5 16 10.5l6.5 11M12.3 17.4h7.4" fill="none" stroke="#0b0d12" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  return '<img class="mark" src="/static/brand/avatar.png?v=2" width="' + size + '" height="' + size + '" alt="" draggable="false">';
 };

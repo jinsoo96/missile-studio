@@ -203,3 +203,12 @@ def test_failed_first_turn_is_kept_and_skipped_in_history(client):
     assert events[-1]["finish_reason"] == "stop"
     # the empty failed turn is not part of what the provider receives
     assert [m["role"] for m in FakeProvider.seen[-1]] == ["system", "user", "user"]
+
+
+def test_brand_files_are_served(client):
+    """The mark and the favicon come from static/brand (replaceable files), and /favicon.ico is the PNG, not a 204."""
+    r = client.get("/favicon.ico")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert client.get("/static/brand/avatar.png").status_code == 200
+    assert client.get("/static/brand/apple-touch-icon.png").status_code == 200
+    assert 'rel="icon"' in client.get("/").text and "brand/avatar.png" in client.get("/static/icons.js").text

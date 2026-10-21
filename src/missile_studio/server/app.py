@@ -804,7 +804,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     @app.get("/favicon.ico")
     async def favicon():
-        return Response(status_code=204)
+        # the brand mark (static/brand/*) is the owner's avatar; replace those files to rebrand
+        return FileResponse(STATIC / "brand" / "favicon.png", media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
 
     return app
 

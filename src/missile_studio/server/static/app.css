@@ -413,3 +413,10 @@ body { letter-spacing: -0.005em; } .wordmark, .page h1, .pane-head h2 { font-wei
 :root[data-theme="dark"] .login { background: radial-gradient(900px 520px at 72% -10%, rgba(139, 92, 246, .20), transparent 60%), radial-gradient(700px 420px at 8% 110%, rgba(34, 211, 238, .12), transparent 60%), var(--bg); }
 :root[data-theme="dark"] .login form { background: linear-gradient(180deg, #141821, #10131b); border-color: #262c3b; box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 0 0 1px rgba(139, 124, 255, .08); }
 :root[data-theme="dark"] .tool.run summary .dot { background: #c4b5fd; }
+
+/* brand mark = owner avatar: round everywhere, a soft glow on dark */
+img.mark { display: block; border-radius: 50%; object-fit: cover; box-shadow: 0 0 0 1px rgba(255, 255, 255, .08); }
+.rail .logo img.mark { width: 34px; height: 34px; }
+.empty .big img.mark { width: 64px; height: 64px; }
+:root[data-theme="dark"] .rail .logo img.mark, :root[data-theme="dark"] .empty .big img.mark { box-shadow: 0 0 0 1px rgba(139, 124, 255, .35), 0 0 18px rgba(139, 124, 255, .28); }
+.rail .logo svg, .empty .big svg { filter: none; }
