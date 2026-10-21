@@ -316,7 +316,7 @@ class Engine:
         style = self.cfg.style(req.style_id or conv.get("style_id") or "")
         if style and style.prompt:
             system += "\n\nWriting style: " + style.prompt
-        messages: list[dict] = [{"role": "system", "content": system}] + [_strip(m) for m in history] + [user_msg]
+        messages: list[dict] = [{"role": "system", "content": system}] + [_strip(m) for m in _repair_history(history)] + [user_msg]
         options = GenerationOptions(
             temperature=assistant.temperature if assistant else None,
             max_tokens=assistant.max_tokens if assistant else None,
@@ -334,6 +334,7 @@ class Engine:
         max_iter = assistant.max_iterations if assistant else 25
         finish = "stop"
         iterations = 0
+        pending: dict[str, dict] = {}  # tool calls of the current assistant message that have no result yet
         try:
             for iterations in range(1, max_iter + 1):
                 text_parts: list[str] = []
@@ -377,7 +378,12 @@ class Engine:
                     self.store.append_message(req.conversation_id, assistant_msg)
                     yield {"type": "message", "message": assistant_msg}
                 messages.append(_strip(assistant_msg))
+                pending = {c["id"]: c for c in calls}
                 if had_error or not calls:
+                    # a stream that failed after announcing tool calls: close them, or the next turn's history is invalid
+                    for tm in self._close_pending(req.conversation_id, pending, "skipped: the model stream ended with an error before this tool ran"):
+                        yield {"type": "tool_result", "id": tm["tool_call_id"], "name": tm["name"], "is_error": True, "text": tm["content"], "duration_ms": 0, "decision": "cancelled", "images": []}
+                        yield {"type": "message", "message": tm}
                     break
                 # execute tool calls sequentially (deterministic, approval-friendly)
                 for c in calls:
@@ -419,6 +425,7 @@ class Engine:
                     if images:
                         tool_msg["images"] = images[:4]
                     self.store.append_message(req.conversation_id, tool_msg)
+                    pending.pop(c["id"], None)
                     yield {"type": "tool_result", "id": c["id"], "name": c["name"], "is_error": tool_msg["is_error"], "text": text[:4000], "duration_ms": dur, "decision": decision, "images": tool_msg.get("images", [])}
                     yield {"type": "message", "message": tool_msg}
                     messages.append(_strip(tool_msg))
@@ -429,14 +436,53 @@ class Engine:
                 yield {"type": "status", "event": "max_iterations", "data": {"max": max_iter}}
                 finish = "max_iterations"
         except asyncio.CancelledError:
+            # Stop pressed (or the client went away) while tools were still running: every call without a result
+            # gets a terminal "cancelled" one, so the UI stops showing it as running and the thread stays valid.
+            for tm in self._close_pending(req.conversation_id, pending, "stopped: the turn was cancelled before this tool finished"):
+                yield {"type": "tool_result", "id": tm["tool_call_id"], "name": tm["name"], "is_error": True, "text": tm["content"], "duration_ms": 0, "decision": "cancelled", "images": []}
             yield {"type": "done", "finish_reason": "cancelled", "iterations": iterations}
             raise
+        finally:
+            # also covers a generator closed from outside (GeneratorExit) and unexpected exceptions; no-op when nothing is pending
+            self._close_pending(req.conversation_id, pending, "stopped: the turn ended before this tool finished")
         yield {"type": "done", "finish_reason": finish, "iterations": iterations}
+
+    def _close_pending(self, cid: str, pending: dict[str, dict], reason: str) -> list[dict]:
+        """Persist a terminal tool message for each call that never got a result (and audit it). Clears ``pending``."""
+        out: list[dict] = []
+        for call_id, c in list(pending.items()):
+            tool_msg = {"role": "tool", "tool_call_id": call_id, "name": c["name"], "content": reason, "is_error": True, "decision": "cancelled", "duration_ms": 0}
+            self.store.append_message(cid, tool_msg)
+            self.store.audit(conversation_id=cid, tool=c["name"], arguments=c.get("arguments") or {}, decision="cancelled", is_error=True, duration_ms=0, result_excerpt=reason)
+            out.append(tool_msg)
+        pending.clear()
+        return out
 
     async def one_shot(self, text: str, provider_id: str = "", model: str = "", assistant_id: str = "", tools: Any = None) -> AsyncIterator[dict]:
         conv = self.store.create_conversation(title=text[:60], assistant_id=assistant_id or "default")
         async for ev in self.run_turn(TurnRequest(conversation_id=conv["id"], user_text=text, provider_id=provider_id, model=model, assistant_id=assistant_id, tools_override=tools)):
             yield ev
+
+
+def _repair_history(history: list[dict]) -> list[dict]:
+    """Threads written before 0.4.4 may hold assistant tool_calls that never got a tool message (a stopped turn).
+    Providers reject such a history, so each orphan call gets a terminal result right after its assistant message."""
+    out: list[dict] = []
+    i = 0
+    while i < len(history):
+        m = history[i]
+        out.append(m)
+        i += 1
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            answered: set = set()
+            while i < len(history) and history[i].get("role") == "tool":
+                answered.add(history[i].get("tool_call_id"))
+                out.append(history[i])
+                i += 1
+            for c in m["tool_calls"]:
+                if c.get("id") not in answered:
+                    out.append({"role": "tool", "tool_call_id": c.get("id"), "name": c.get("name", "tool"), "content": "no result: the turn was stopped before this tool finished", "is_error": True})
+    return out
 
 
 def _strip(m: dict) -> dict:

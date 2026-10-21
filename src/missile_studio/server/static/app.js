@@ -265,10 +265,12 @@
   }
   function splitPane(idx) { if (S.panes.length >= MAX_PANES) return; const np = newPane(); np.sel = { ...S.panes[idx].sel }; S.panes.splice(idx + 1, 0, np); S.active = idx + 1; S.view = 'chat'; render(); }
   function closePane(idx) { if (S.panes.length <= 1) return; S.panes.splice(idx, 1); S.active = Math.min(S.active, S.panes.length - 1); render(); }
-  function toolCard(call, result) {
-    const state = result ? (result.is_error ? 'err' : 'ok') : 'run';
-    const d = el('details', { class: 'tool ' + state, open: state !== 'ok' });
-    const stateText = result ? `${result.decision || (result.is_error ? 'error' : 'ok')}${result.duration_ms != null ? ' · ' + fmtMs(result.duration_ms) : ''}` : 'running…';
+  function toolCard(call, result, live = true) {
+    // run = still executing in this live stream · stale = no result and nothing running (a stopped turn) · cancelled results are stale too
+    const cancelled = !!result && result.decision === 'cancelled';
+    const state = cancelled ? 'stale' : result ? (result.is_error ? 'err' : 'ok') : (live ? 'run' : 'stale');
+    const d = el('details', { class: 'tool ' + state, open: state === 'run' || state === 'err' });
+    const stateText = cancelled ? 'cancelled' : result ? `${result.decision || (result.is_error ? 'error' : 'ok')}${result.duration_ms != null ? ' · ' + fmtMs(result.duration_ms) : ''}` : (live ? 'running…' : 'no result · stopped');
     d.append(el('summary', {}, el('span', { class: 'dot' }), I('wrench', 'sm'), el('span', { class: 'tname' }, call.name), el('span', { class: 'tstate' }, stateText, I('chevron', 'xs'))));
     const body = el('div', { class: 'tbody' });
     const args = JSON.stringify(call.arguments ?? {}, null, 1);
@@ -351,7 +353,7 @@
           if (mm.role === 'assistant') {
             if (mm.thinking) content.append(el('details', { class: 'think' }, el('summary', {}, I('brain', 'sm'), 'Thinking'), el('div', { class: 'tbody' }, mm.thinking)));
             if (mm.content) { const mdEl = el('div', { class: 'md', html: md(mm.content) }); artifactize(mdEl, mm.id, pane.convId); content.append(mdEl); lastText = mm.content; }
-            for (const c of mm.tool_calls || []) content.append(toolCard(c, toolResults[c.id]));
+            for (const c of mm.tool_calls || []) content.append(toolCard(c, toolResults[c.id], !!live));
             if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage;
           }
           i++;

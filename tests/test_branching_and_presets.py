@@ -147,3 +147,20 @@ def test_workspace_history(client):
     assert client.get("/api/workspace/history/file?name=../config.json", headers=OWNER).status_code == 404
     tree = client.get("/api/workspace/tree", headers=OWNER).json()
     assert all(e["name"] != ".history" for e in tree["entries"])
+
+
+def test_repair_history_answers_orphan_tool_calls():
+    from missile_studio.engine import _repair_history
+
+    hist = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "name": "t1"}, {"id": "b", "name": "t2"}]},
+        {"role": "tool", "tool_call_id": "a", "name": "t1", "content": "ok"},
+        {"role": "assistant", "content": "done"},
+    ]
+    out = _repair_history(hist)
+    assert [m["role"] for m in out] == ["user", "assistant", "tool", "tool", "assistant"]
+    assert out[3]["tool_call_id"] == "b" and out[3]["is_error"] is True
+    # a healthy history is returned unchanged
+    good = hist[:3] + [{"role": "tool", "tool_call_id": "b", "name": "t2", "content": "ok"}, hist[3]]
+    assert _repair_history(good) == good

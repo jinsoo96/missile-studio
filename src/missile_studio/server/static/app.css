@@ -368,3 +368,6 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 /* file rows: download link shows on hover */
 .tree .row .dl { margin-left: 4px; color: var(--fg-3); opacity: 0; display: inline-flex; }
 .tree .row:hover .dl { opacity: 1; } .tree .row .dl:hover { color: var(--fg); }
+
+/* tool card: no result and nothing running (stopped turn) -> grey, no blink */
+.tool.stale summary .dot { background: var(--fg-3); animation: none; }

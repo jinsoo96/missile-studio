@@ -136,3 +136,39 @@ def test_upload_text_and_image(client, tmp_path):
     assert r.json()["text"] == "hello"
     r = client.post("/api/upload", files={"file": ("a.png", b"\x89PNG....", "image/png")}, headers=H)
     assert r.json()["data_url"].startswith("data:image/png;base64,")
+
+
+def test_stop_during_tool_closes_pending_calls(client):
+    """Stop while a tool waits for approval: the call gets a 'cancelled' result, the card is not left running, the next turn still works."""
+    client.put("/api/policy", json={"default": "ask", "read_only_default": "allow", "rules": {}}, headers=H)
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    FakeProvider.script = [
+        [{"type": "tool_call", "id": "s1", "name": "echo__shout_destructive", "arguments": {"text": "a"}}, {"type": "tool_call", "id": "s2", "name": "echo__shout_destructive", "arguments": {"text": "b"}}, {"type": "done", "finish_reason": "tool_calls"}],
+        [{"type": "text_delta", "text": "after stop"}, {"type": "done", "finish_reason": "stop"}],
+    ]
+
+    def stopper():
+        import time
+
+        for _ in range(100):
+            time.sleep(0.1)
+            if client.get("/api/approvals", headers=H).json():
+                client.post(f"/api/chat/{conv['id']}/stop", headers=H)
+                return
+
+    th = threading.Thread(target=stopper, daemon=True)
+    th.start()
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "shout twice"}, headers=H) as resp:
+        events = read_sse(resp)
+    th.join(timeout=5)
+    assert any(e["type"] == "done" and e.get("finish_reason") == "cancelled" for e in events)
+    msgs = client.get(f"/api/conversations/{conv['id']}", headers=H).json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "tool"]
+    assert {m["tool_call_id"] for m in msgs if m["role"] == "tool"} == {"s1", "s2"}
+    assert all(m["decision"] == "cancelled" and m["is_error"] for m in msgs if m["role"] == "tool")
+    assert client.get("/api/audit", headers=H).json()[0]["decision"] == "cancelled"
+    # the next turn sends a valid history (every tool call answered) and completes
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "and now?"}, headers=H) as resp:
+        events = read_sse(resp)
+    assert events[-1]["finish_reason"] == "stop"
+    assert [m["role"] for m in FakeProvider.seen[-1]] == ["system", "user", "assistant", "tool", "tool", "user"]

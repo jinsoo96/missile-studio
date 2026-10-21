@@ -22,6 +22,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+
+# download types the OS tables disagree on (Windows registry vs /etc/mime.types): pin the ones the agent writes most
+for _mt, _ext in (("text/markdown", ".md"), ("text/markdown", ".markdown"), ("application/json", ".json"), ("text/csv", ".csv"), ("text/yaml", ".yml"), ("text/yaml", ".yaml"), ("text/plain", ".txt"), ("text/plain", ".log")):
+    mimetypes.add_type(_mt, _ext)
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
