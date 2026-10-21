@@ -19,6 +19,12 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
 
 ## Screenshots
 
+**Sign in.** Dark by default. Accounts have roles: admins run the studio, users chat. Sign-up on the
+login page can be closed, invite-only (default, with a code shown in the admin console) or open. A session
+lasts 30 days when you ask it to.
+
+![login](docs/screenshots/login.png)
+
 **Chat.** Icon rail, chat list grouped by day, one conversation in the middle. Assistant and model are
 pills in the top bar, so you can switch mid-conversation. Every tool call is a collapsible card inside
 the answer: name, arguments, result, policy decision and duration. Markdown, code blocks with copy,
