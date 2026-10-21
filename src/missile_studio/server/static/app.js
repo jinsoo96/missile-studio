@@ -82,7 +82,20 @@
     return ct.includes('json') ? r.json() : r.text();
   }
   function showLogin() { $('#login').classList.remove('hidden'); $('#app').classList.add('hidden'); }
-  $('#loginForm').addEventListener('submit', async (e) => { e.preventDefault(); token = $('#loginToken').value.trim(); try { await api('/api/login', { method: 'POST', body: { token } }); localStorage.setItem('missile_token', token); $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); await boot(); } catch { $('#loginErr').textContent = 'That token was not accepted.'; } });
+  $('#loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault(); const err = $('#loginErr'); err.textContent = '';
+    const tokenVal = $('#loginToken').value.trim();
+    try {
+      if (tokenVal) { token = tokenVal; await api('/api/login', { method: 'POST', body: { token } }); localStorage.setItem('missile_token', token); }
+      else {
+        // admin account: the cookie session covers the studio and /admin; no token is kept in this browser
+        token = ''; localStorage.removeItem('missile_token');
+        await api('/api/admin/auth/login', { method: 'POST', body: { username: $('#loginUser').value.trim(), password: $('#loginPass').value, remember: $('#loginRemember').checked } });
+      }
+      $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); await boot();
+    } catch (e2) { err.textContent = tokenVal ? 'That token was not accepted.' : (e2.message === 'rate_limited' ? 'Too many attempts. Wait a minute.' : 'Wrong username or password.'); }
+  });
+  async function signOut() { try { await api('/api/admin/auth/logout', { method: 'POST' }); } catch {} token = ''; try { localStorage.removeItem('missile_token'); } catch {} location.reload(); }
 
   // ---------------------------------------------------------------- state
   const newPane = () => ({ id: Math.random().toString(36).slice(2, 8), convId: null, conv: null, messages: [], branches: {}, sel: {}, attachments: [], draft: '', editing: null, pendingEdit: null });
@@ -499,6 +512,7 @@
       { label: 'Settings · Writing styles', icon: 'wand', run: () => { S.view = 'settings'; S.settingsPage = 'styles'; render(); } },
       { label: 'Admin console', icon: 'shield', run: () => window.open('/admin', '_blank') },
       { label: 'Keyboard shortcuts', sub: 'Ctrl/⌘ /', icon: 'info', run: () => openShortcuts() },
+      ...(S.health?.auth_required ? [{ label: 'Sign out', sub: 'end this session', icon: 'x', run: () => signOut() }] : []),
     ];
     const build = () => {
       const q = inp.value.trim(); const ql = q.toLowerCase(); list.innerHTML = ''; rows = [];
@@ -869,6 +883,7 @@
   function pageGeneral(content) {
     const st = S.st;
     content.append(page('General', 'this studio', el('div', { class: 'card' }, el('h3', {}, 'Server'), el('div', { class: 'grid2' }, field('Version', el('div', {}, 'missile-studio ' + st.version)), field('Bound to', el('div', {}, `${st.server.host}:${st.server.port}` + (st.server.auth_required ? ' · token required' : ' · loopback, no token'))), field('Config file', el('code', {}, st.config_path)), field('Data folder', el('code', {}, st.home))), el('div', { class: 'muted tiny' }, 'Change host/port/token with ', el('code', {}, 'ms serve --host 0.0.0.0 --port 7700 --token …'), ' or ', el('code', {}, 'ms config set-token …'), '. The admin console at ', el('a', { href: '/admin', target: '_blank' }, '/admin'), ' manages tokens, logs, retention and system status.')),
+      st.server.auth_required ? el('div', { class: 'card' }, el('h3', {}, 'Session'), el('div', { class: 'muted tiny' }, S.health?.via === 'cookie' ? 'Signed in with an admin account (cookie session, shared with /admin).' : 'Signed in with an access token kept in this browser.'), el('div', {}, el('button', { class: 'btn', onclick: signOut }, I('x', 'sm'), 'Sign out'))) : null,
       el('div', { class: 'card' }, el('h3', {}, 'Appearance'), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => theme.set('light') }, I('sun', 'sm'), 'Light'), el('button', { class: 'btn', onclick: () => theme.set('dark') }, I('moon', 'sm'), 'Dark'), el('button', { class: 'btn', onclick: () => theme.set('warm') }, I('sparkles', 'sm'), 'Warm'), el('button', { class: 'btn', onclick: () => theme.set('') }, 'System')), el('div', { class: 'muted tiny' }, 'Warm: cream paper, terracotta accents, serif headings.')),
       el('div', { class: 'card' }, el('h3', {}, 'Keyboard'), el('div', {}, el('button', { class: 'btn', onclick: openShortcuts }, I('info', 'sm'), 'Show all shortcuts (Ctrl/⌘ /)'))),
       el('div', { class: 'card' }, el('h3', {}, 'Use this studio elsewhere'), el('div', { class: 'md', html: md('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for other MCP clients: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)') }))));
@@ -876,7 +891,7 @@
 
   // ---------------------------------------------------------------- boot
   async function boot() {
-    try { const h = await fetch('/api/health').then((r) => r.json()); if (h.auth_required && !token) return showLogin(); } catch {}
+    try { const h = await fetch('/api/health', { headers: headers() }).then((r) => r.json()); S.health = h; if (h.auth_required && !token && !h.signed_in) return showLogin(); } catch {}
     try { await loadState(); await loadConvs(); } catch (e) { if (e.message !== 'unauthorized') toast(e.message, true); return; }
     $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
     if (!S.st.providers.length) { S.view = 'settings'; S.settingsPage = 'providers'; }

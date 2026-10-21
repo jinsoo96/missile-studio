@@ -88,6 +88,7 @@ logs to `%USERPROFILE%\.missile-studio\logs\serve.log`.
 | symptom | check |
 |---|---|
 | 401 in the browser | token mismatch: open `/?token=<value>` once, or clear `localStorage` |
+| Login screen on every visit | sign in with an admin username / password and leave *Stay signed in* on (30-day cookie). Set the password with `ms admin reset-password admin --password …`. The token field is under *Use an access token instead*. |
 | provider test fails | `missile provider test <id>`; for Ollama/vLLM confirm `/v1/models` responds from the server itself |
 | MCP server `failed` | `missile mcp test <name>`; stderr is in `~/.missile-studio/logs/mcp-<name>.log`; on Windows `npx` needs Node in PATH of the service user |
 | tools never run, always "requires approval" in hub/bridge | add allow rules (`missile policy set <tool> allow`) or start with `--trust` |

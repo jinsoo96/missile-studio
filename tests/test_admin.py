@@ -181,3 +181,28 @@ def test_admin_page_is_served(client):
     r = client.get("/admin")
     assert r.status_code == 200 and "admin.js" in r.text
     assert client.get("/admin/settings").status_code == 200
+
+
+def test_studio_login_with_admin_account_and_remember_me(client):
+    """The studio UI signs in through the admin endpoint: /api/health reports the session, remember=True lasts 30 days, logout ends it."""
+    pw = client.app.state.bootstrap_password
+    h = client.get("/api/health").json()
+    assert h["auth_required"] is True and h["signed_in"] is False
+    r = client.post("/api/admin/auth/login", json={"username": "admin", "password": pw, "remember": True})
+    assert r.status_code == 200 and r.json()["expires_in"] == adminmod.REMEMBER_TTL
+    assert "max-age=2592000" in r.headers["set-cookie"].lower()
+    h = client.get("/api/health").json()
+    assert h["signed_in"] is True and h["via"] == "cookie"
+    # the cookie session is a full studio principal (GET without CSRF, mutation with it)
+    assert client.get("/api/state").status_code == 200
+    assert client.post("/api/conversations", json={}).status_code == 403
+    assert client.post("/api/conversations", json={}, headers=CSRF).status_code == 200
+    # a stale token in the Authorization header does not break the cookie session
+    assert client.get("/api/state", headers={"Authorization": "Bearer stale"}).status_code == 200
+    r = client.post("/api/admin/auth/logout", headers=CSRF)
+    assert r.status_code == 200
+    client.cookies.clear()
+    assert client.get("/api/health").json()["signed_in"] is False
+    # without remember the session is the short one
+    r = client.post("/api/admin/auth/login", json={"username": "admin", "password": pw})
+    assert r.json()["expires_in"] == adminmod.SESSION_TTL

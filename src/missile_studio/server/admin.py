@@ -3,8 +3,10 @@
 Security model
 --------------
 - Admin users (table ``admin_users``) log in with username + password (PBKDF2-SHA256, 200k rounds).
-- A session is an HS256 JWT (12h) in the httpOnly cookie ``missile_admin``; SameSite=lax. The signing
-  secret lives in ``<MISSILE_HOME>/secret.key`` and is created on first use.
+- A session is an HS256 JWT (12h, or 30 days with "stay signed in") in the httpOnly cookie
+  ``missile_admin``; SameSite=lax. The signing secret lives in ``<MISSILE_HOME>/secret.key`` and is
+  created on first use. The main studio UI signs in through the same endpoint, so one login covers
+  both the studio and ``/admin``.
 - Every mutating admin call made with the cookie must also carry ``X-Requested-With: missile-admin``
   (a cross-site page cannot add that header without a CORS preflight, which we never grant).
 - The owner API token (config ``server.token``) and API tokens with the ``admin`` scope may call the
@@ -39,6 +41,7 @@ from ..config import ToolPolicy, config_path, home_dir, log_dir, save_config
 
 SESSION_COOKIE = "missile_admin"
 SESSION_TTL = 12 * 3600
+REMEMBER_TTL = 30 * 86400  # "stay signed in on this browser"
 CSRF_HEADER = "x-requested-with"
 CSRF_VALUE = "missile-admin"
 PBKDF2_ROUNDS = 200_000
@@ -430,6 +433,7 @@ async def retention_loop(engine, store, interval: float = 6 * 3600) -> None:
 class LoginIn(BaseModel):
     username: str
     password: str
+    remember: bool = False  # 30-day session instead of 12h
 
 
 class PasswordIn(BaseModel):
@@ -484,16 +488,18 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         if not user or not verify_password(body.password, user["password_hash"]):
             store.event("warn", "auth", "login failed", {"ip": ip, "username": body.username[:64]})
             raise HTTPException(401, "invalid_credentials")
-        tok = jwt_encode({"sub": user["username"], "iat": int(time.time()), "exp": int(time.time() + SESSION_TTL), "typ": "admin"})
+        ttl = REMEMBER_TTL if body.remember else SESSION_TTL
+        tok = jwt_encode({"sub": user["username"], "iat": int(time.time()), "exp": int(time.time() + ttl), "typ": "admin"})
         secure = (request.headers.get("x-forwarded-proto") == "https") or request.url.scheme == "https"
-        response.set_cookie(SESSION_COOKIE, tok, httponly=True, samesite="lax", secure=secure, max_age=SESSION_TTL, path="/")
+        response.set_cookie(SESSION_COOKIE, tok, httponly=True, samesite="lax", secure=secure, max_age=ttl, path="/")
         store.touch_admin_login(user["username"])
-        store.event("info", "auth", "login", {"ip": ip}, actor=user["username"])
-        return {"username": user["username"], "mustChangePassword": bool(user["must_change_password"])}
+        store.event("info", "auth", "login", {"ip": ip, "remember": bool(body.remember)}, actor=user["username"])
+        return {"username": user["username"], "mustChangePassword": bool(user["must_change_password"]), "expires_in": ttl}
 
     @r.post("/auth/logout")
     async def logout(response: Response, request: Request):
         response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie("missile_token", path="/")  # the studio's token cookie, if the browser used one
         return {"ok": True}
 
     @r.get("/auth/me")

@@ -151,6 +151,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         p = principal_of(request)
         if p["role"] == "anon":
             raise HTTPException(status_code=401, detail="unauthorized")
+        # cookie sessions are ambient credentials: every mutation must prove it came from our own page
+        if p.get("via") == "cookie" and request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get(adminmod.CSRF_HEADER, "").lower() != adminmod.CSRF_VALUE:
+            raise HTTPException(status_code=403, detail="csrf")
         return p
 
     def require_admin(request: Request) -> dict:
@@ -185,8 +188,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ basics
     @app.get("/api/health")
-    async def health():
-        return {"ok": True, "version": __version__, "auth_required": bool(app.state.token), "home": str(home_dir()), "maintenance": bool(store.get_setting("maintenance_mode", False))}
+    async def health(request: Request):
+        p = principal_of(request)  # lets the UI skip its login screen when a cookie session or token cookie is already valid
+        return {"ok": True, "version": __version__, "auth_required": bool(app.state.token), "signed_in": p["role"] != "anon", "via": p.get("via", ""), "home": str(home_dir()), "maintenance": bool(store.get_setting("maintenance_mode", False))}
 
     @app.post("/api/login")
     async def login(body: LoginIn):

@@ -4,24 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>missile-studio</title>
-<link rel="stylesheet" href="/static/app.css?v=0.4.0">
+<link rel="stylesheet" href="/static/app.css?v=0.4.1">
 <script>try{var t=localStorage.getItem('missile_theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/icons.js?v=0.4.0"></script>
+<script src="/static/icons.js?v=0.4.1"></script>
 </head>
 <body>
 <div id="login" class="login hidden">
   <form id="loginForm">
     <h1><span>🚀</span> missile-studio</h1>
-    <p class="muted" style="margin:0">This server requires an access token. <code>ms serve</code> printed it.</p>
-    <input id="loginToken" class="input" type="password" placeholder="access token" autocomplete="off">
-    <button type="submit" class="btn primary">Continue</button>
+    <p class="muted" style="margin:0">Sign in with an admin account. The same session opens <code>/admin</code>.</p>
+    <input id="loginUser" class="input" placeholder="username" autocomplete="username" value="admin">
+    <input id="loginPass" class="input" type="password" placeholder="password" autocomplete="current-password">
+    <label class="muted tiny" style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="loginRemember" type="checkbox" checked> Stay signed in on this browser (30 days)</label>
+    <details><summary class="muted tiny" style="cursor:pointer">Use an access token instead</summary><input id="loginToken" class="input" type="password" placeholder="access token (ms serve printed it)" autocomplete="off" style="margin-top:8px"></details>
+    <button type="submit" class="btn primary">Sign in</button>
     <div id="loginErr" class="muted tiny" style="color:var(--destructive)"></div>
   </form>
 </div>
 <div id="app"></div>
 <div id="layer"></div>
-<script src="/static/app.js?v=0.4.0"></script>
+<script src="/static/app.js?v=0.4.1"></script>
 </body>
 </html>
