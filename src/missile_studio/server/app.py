@@ -674,6 +674,17 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             text = data.decode("cp949", "replace")
         return {"path": path, "content": text, "size": size, "mtime": p.stat().st_mtime}
 
+    @app.get("/api/workspace/download", dependencies=[user_dep])
+    async def ws_download(path: str):
+        """Any file in the workspace as an attachment (binary too): what the agent wrote, what you saved."""
+        p = _ws_resolve(path)
+        if not p.is_file():
+            raise HTTPException(404, "no such file")
+        if p.stat().st_size > 512 * 1024 * 1024:
+            raise HTTPException(413, "file larger than 512MB")
+        mt = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        return FileResponse(p, media_type=mt, filename=p.name, headers={"Cache-Control": "no-store"})
+
     class WsFileIn(BaseModel):
         path: str
         content: str

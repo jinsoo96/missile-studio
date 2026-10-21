@@ -72,6 +72,10 @@
   let token = localStorage.getItem('missile_token') || new URLSearchParams(location.search).get('token') || '';
   if (new URLSearchParams(location.search).get('token')) { localStorage.setItem('missile_token', token); history.replaceState({}, '', location.pathname); }
   const headers = () => ({ 'X-Requested-With': 'missile-admin', ...(token ? { Authorization: 'Bearer ' + token } : {}) });
+  // plain links need their own credential: cookie sessions just work, token users get ?token= on the URL
+  const downloadUrl = (p) => '/api/workspace/download?path=' + encodeURIComponent(p) + (token ? '&token=' + encodeURIComponent(token) : '');
+  const baseName = (p) => String(p || '').replace(/\\/g, '/').split('/').pop() || 'file';
+  function saveBlob(name, text, type = 'text/plain;charset=utf-8') { const u = URL.createObjectURL(new Blob([text], { type })); const a = el('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 3000); }
   async function api(path, opts = {}) {
     const o = { ...opts, headers: { ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...headers(), ...(opts.headers || {}) } };
     if (o.body && typeof o.body !== 'string' && !(o.body instanceof FormData)) o.body = JSON.stringify(o.body);
@@ -270,6 +274,8 @@
     const args = JSON.stringify(call.arguments ?? {}, null, 1);
     body.append(el('div', { class: 'lbl' }, 'arguments'), el('pre', {}, args.length > 2000 ? args.slice(0, 2000) + '…' : args));
     if (result) { body.append(el('div', { class: 'lbl' }, 'result'), el('pre', {}, String(result.text || result.content || '').slice(0, 6000))); for (const im of result.images || []) body.append(el('img', { src: `data:${im.mime_type || 'image/png'};base64,${im.data}` })); }
+    // a file the agent just wrote into the workspace can be taken straight from the card
+    if (result && !result.is_error && call.name === 'local__write_file' && call.arguments?.path) body.append(el('a', { class: 'btn sm', style: 'margin-top:8px;display:inline-flex', href: downloadUrl(call.arguments.path), download: baseName(call.arguments.path) }, I('download', 'sm'), 'Download ' + baseName(call.arguments.path)));
     d.append(body);
     return d;
   }
@@ -297,7 +303,7 @@
       const art = existing || { id, lang, code: text, lines, name: hint || `artifact-${Object.keys(S.artifacts).length + 1}.${EXT[lang] || 'txt'}`, convId, msgId, ts: Date.now() };
       S.artifacts[id] = art;
       const card = el('div', { class: 'artifact', 'data-art': id },
-        el('div', { class: 'ahead', onclick: () => openArtifact(id) }, el('div', { class: 'aicon' }, I(lang === 'html' || lang === 'svg' ? 'globe' : lang === 'markdown' || lang === 'md' ? 'file' : 'terminal', 'sm')), el('div', { style: 'min-width:0' }, el('div', { class: 'atitle truncate' }, art.name), el('div', { class: 'asub' }, `${lang || 'text'} · ${lines} lines · click to open`)), el('div', { class: 'aactions' }, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => toast('copied')); } }, I('copy', 'xs')), isAdmin() ? el('button', { class: 'btn quiet icon sm', title: 'Save to workspace', onclick: (e) => { e.stopPropagation(); saveArtifact(id); } }, I('download', 'xs')) : null)),
+        el('div', { class: 'ahead', onclick: () => openArtifact(id) }, el('div', { class: 'aicon' }, I(lang === 'html' || lang === 'svg' ? 'globe' : lang === 'markdown' || lang === 'md' ? 'file' : 'terminal', 'sm')), el('div', { style: 'min-width:0' }, el('div', { class: 'atitle truncate' }, art.name), el('div', { class: 'asub' }, `${lang || 'text'} · ${lines} lines · click to open`)), el('div', { class: 'aactions' }, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => toast('copied')); } }, I('copy', 'xs')), el('button', { class: 'btn quiet icon sm', title: 'Download', onclick: (e) => { e.stopPropagation(); saveBlob(art.name, text); } }, I('download', 'xs')), isAdmin() ? el('button', { class: 'btn quiet icon sm', title: 'Save to workspace', onclick: (e) => { e.stopPropagation(); saveArtifact(id); } }, I('file', 'xs')) : null)),
         el('details', {}, el('summary', {}, 'show code'), pre.cloneNode(true)));
       pre.replaceWith(card);
     });
@@ -353,7 +359,7 @@
         const meta = el('div', { class: 'meta' }); if (totalMs) meta.append(el('span', {}, `Processed · ${fmtMs(totalMs)}`)); if (usage) meta.append(el('span', {}, `${usage.input_tokens || 0}↑ ${usage.output_tokens || 0}↓ tokens`));
         const nav = branchNav(pane, firstId); if (nav) meta.append(nav);
         const acts = el('span', { class: 'actions' });
-        if (lastText) acts.append(el('button', { class: 'btn quiet icon sm', title: 'Copy answer', onclick: () => navigator.clipboard.writeText(lastText).then(() => toast('copied')) }, I('copy', 'xs')));
+        if (lastText) { const lt = lastText; acts.append(el('button', { class: 'btn quiet icon sm', title: 'Copy answer', onclick: () => navigator.clipboard.writeText(lt).then(() => toast('copied')) }, I('copy', 'xs')), el('button', { class: 'btn quiet icon sm', title: 'Download answer as Markdown (.md)', onclick: () => saveBlob(((pane.conv?.title || 'answer').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 50) || 'answer') + '.md', lt, 'text/markdown;charset=utf-8') }, I('download', 'xs'))); }
         if (lastUser) { const lu = lastUser; acts.append(el('button', { class: 'btn quiet icon sm', title: 'Retry: ask again as a new branch', onclick: () => startStream(pane, textOf(lu), [], { branchFrom: lu.id }) }, I('refresh', 'xs'))); }
         meta.append(acts); body.append(meta); inner.append(node); continue;
       }
@@ -585,7 +591,7 @@
       body.append(crumbs);
       const tree = el('div', { class: 'tree' });
       if (D.path !== '.') tree.append(el('div', { class: 'row', onclick: () => loadTree(parts.slice(0, -1).join('/') || '.') }, I('chevronR', 'xs'), '..'));
-      for (const e of D.entries) tree.append(el('div', { class: 'row' + (D.file && D.file.path === e.path ? ' sel' : ''), onclick: () => e.dir ? loadTree(e.path) : openFile(e.path) }, I(e.dir ? 'box' : 'file', 'sm'), el('span', { class: 'truncate' }, e.name), e.dir ? null : el('span', { class: 'sz' }, fmtBytes(e.size))));
+      for (const e of D.entries) tree.append(el('div', { class: 'row' + (D.file && D.file.path === e.path ? ' sel' : ''), onclick: () => e.dir ? loadTree(e.path) : openFile(e.path) }, I(e.dir ? 'box' : 'file', 'sm'), el('span', { class: 'truncate' }, e.name), e.dir ? null : el('span', { class: 'sz' }, fmtBytes(e.size)), e.dir ? null : el('a', { class: 'dl', href: downloadUrl(e.path), download: e.name, title: 'Download', onclick: (ev) => ev.stopPropagation() }, I('download', 'xs'))));
       if (!D.entries.length && !D.loading) tree.append(el('div', { class: 'muted tiny', style: 'padding:10px' }, 'Empty folder. Ask the agent to create something, save an artifact, or use the terminal.'));
       body.append(tree);
       body.append(el('div', { class: 'dfoot' }, D.root || ''));
@@ -611,7 +617,7 @@
     const f = D.file; const dirty = f.content !== f.saved;
     const ed = el('div', { class: 'editor' });
     const versionsBtn = el('button', { class: 'btn sm', title: 'Previous saved versions', onclick: async () => { try { const h = await api(`/api/workspace/history?path=${encodeURIComponent(f.path)}`); D.versions = h.versions; ed.replaceWith(renderEditor()); } catch (e) { toast(e.message, true); } } }, I('clock', 'sm'), 'Versions');
-    ed.append(el('div', { class: 'ehead' }, el('span', { class: 'mono truncate' }, f.path), el('span', { class: 'muted' }, fmtBytes(f.size)), el('span', { class: 'spacer' }), versionsBtn, el('button', { class: 'btn sm', title: 'Ask the active pane about this file', onclick: () => { const p = activePane(); p.draft = (p.draft ? p.draft + '\n' : '') + `Look at ${f.path} and `; render(); $('.composerInput', paneEl(p))?.focus(); } }, I('chat', 'sm'), 'Ask'), isAdmin() ? el('button', { class: 'btn primary sm', disabled: !dirty, onclick: saveFile }, I('check', 'sm'), dirty ? 'Save' : 'Saved') : el('span', { class: 'chip' }, 'read-only')));
+    ed.append(el('div', { class: 'ehead' }, el('span', { class: 'mono truncate' }, f.path), el('span', { class: 'muted' }, fmtBytes(f.size)), el('span', { class: 'spacer' }), f.onDisk === false ? null : el('a', { class: 'btn sm', href: downloadUrl(f.path), download: baseName(f.path), title: 'Download this file' }, I('download', 'sm')), versionsBtn, el('button', { class: 'btn sm', title: 'Ask the active pane about this file', onclick: () => { const p = activePane(); p.draft = (p.draft ? p.draft + '\n' : '') + `Look at ${f.path} and `; render(); $('.composerInput', paneEl(p))?.focus(); } }, I('chat', 'sm'), 'Ask'), isAdmin() ? el('button', { class: 'btn primary sm', disabled: !dirty, onclick: saveFile }, I('check', 'sm'), dirty ? 'Save' : 'Saved') : el('span', { class: 'chip' }, 'read-only')));
     if (D.versions) {
       ed.append(el('div', { class: 'row', style: 'padding:6px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap;font-size:12px' }, el('span', { class: 'muted' }, D.versions.length ? 'versions:' : 'no previous versions'), ...D.versions.slice(0, 8).map((v) => el('button', { class: 'btn sm', onclick: async () => { try { const r = await api(`/api/workspace/history/file?name=${encodeURIComponent(v.name)}`); showDiff(`Version from ${new Date(v.ts * 1000).toLocaleString()}`, f.content, r.content, () => { f.content = r.content; ed.replaceWith(renderEditor()); }); } catch (e) { toast(e.message, true); } } }, new Date(v.ts * 1000).toLocaleTimeString())), el('button', { class: 'btn quiet sm', onclick: () => { D.versions = null; ed.replaceWith(renderEditor()); } }, 'hide')));
     }
@@ -692,7 +698,7 @@
     const canPreview = PREVIEWABLE.includes(a.lang);
     const swap = () => view.replaceWith(renderArtifacts());
     const tabs = el('div', { class: 'tabs' }, ...(canPreview ? [el('button', { class: D.aTab === 'preview' ? 'active' : '', onclick: () => { D.aTab = 'preview'; swap(); } }, 'Preview')] : []), el('button', { class: D.aTab === 'code' || !canPreview ? 'active' : '', onclick: () => { D.aTab = 'code'; swap(); } }, 'Code'));
-    view.append(el('div', { class: 'ahead' }, el('button', { class: 'btn quiet icon sm', title: 'all artifacts', onclick: () => { D.artifact = null; swap(); } }, I('chevronR', 'sm')), el('span', { class: 'mono truncate', style: 'max-width:160px' }, a.name), el('span', { class: 'muted' }, `${a.lang || 'text'} · ${a.lines} lines`), el('span', { class: 'spacer' }), tabs, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(a.code).then(() => toast('copied')) }, I('copy', 'sm')), isAdmin() ? el('button', { class: 'btn primary sm', onclick: () => saveArtifact(a.id) }, I('download', 'sm'), a.savedPath ? 'Save again' : 'Save') : null, el('button', { class: 'btn sm', title: 'Open in the editor', onclick: () => { D.file = { path: a.savedPath || `artifacts/${a.name}`, content: a.code, saved: a.savedPath ? a.code : '', size: a.code.length }; D.tab = 'editor'; D.versions = null; redrawDrawer(); } }, I('edit', 'sm'))));
+    view.append(el('div', { class: 'ahead' }, el('button', { class: 'btn quiet icon sm', title: 'all artifacts', onclick: () => { D.artifact = null; swap(); } }, I('chevronR', 'sm')), el('span', { class: 'mono truncate', style: 'max-width:160px' }, a.name), el('span', { class: 'muted' }, `${a.lang || 'text'} · ${a.lines} lines`), el('span', { class: 'spacer' }), tabs, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(a.code).then(() => toast('copied')) }, I('copy', 'sm')), el('button', { class: 'btn sm', title: 'Download', onclick: () => saveBlob(a.name, a.code) }, I('download', 'sm'), 'Download'), isAdmin() ? el('button', { class: 'btn primary sm', title: 'Save into the workspace folder', onclick: () => saveArtifact(a.id) }, I('file', 'sm'), a.savedPath ? 'Save again' : 'Save') : null, el('button', { class: 'btn sm', title: 'Open in the editor', onclick: () => { D.file = { path: a.savedPath || `artifacts/${a.name}`, content: a.code, saved: a.savedPath ? a.code : '', size: a.code.length, onDisk: !!a.savedPath }; D.tab = 'editor'; D.versions = null; redrawDrawer(); } }, I('edit', 'sm'))));
     const body = el('div', { class: 'abody' });
     if (canPreview && D.aTab !== 'code') {
       if (a.lang === 'html') { const fr = el('iframe', { sandbox: 'allow-scripts', title: a.name }); fr.srcdoc = a.code; body.style.display = 'flex'; body.append(fr); }

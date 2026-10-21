@@ -364,3 +364,7 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 /* composer: the model label is a button that opens the model menu (same as the top-bar pill) */
 .composer .bar .modelbtn { color: var(--fg-muted); font-weight: 500; max-width: 300px; gap: 4px; }
 .composer .bar .modelbtn:hover { color: var(--fg); }
+
+/* file rows: download link shows on hover */
+.tree .row .dl { margin-left: 4px; color: var(--fg-3); opacity: 0; display: inline-flex; }
+.tree .row:hover .dl { opacity: 1; } .tree .row .dl:hover { color: var(--fg); }

@@ -79,3 +79,17 @@ def test_conversations_report_running_flag(client):
     conv = client.post("/api/conversations", json={}, headers=OWNER).json()
     rows = client.get("/api/conversations", headers=OWNER).json()
     assert rows[0]["id"] == conv["id"] and rows[0]["running"] is False
+
+
+def test_workspace_download(client):
+    """Any workspace file comes back as an attachment; paths outside the sandbox and missing files are refused."""
+    client.put("/api/workspace/file", json={"path": "out/report.md", "content": "# hi"}, headers=OWNER)
+    r = client.get("/api/workspace/download?path=out/report.md", headers=OWNER)
+    assert r.status_code == 200 and r.content == b"# hi"
+    cd = r.headers["content-disposition"]
+    assert "attachment" in cd and "report.md" in cd
+    assert r.headers["content-type"].startswith("text/markdown")
+    assert client.get("/api/workspace/download?path=../config.json", headers=OWNER).status_code == 403
+    assert client.get("/api/workspace/download?path=out/nope.bin", headers=OWNER).status_code == 404
+    # the owner token in the query string is enough for a plain <a download> link
+    assert client.get("/api/workspace/download?path=out/report.md&token=owner-tok").status_code == 200
