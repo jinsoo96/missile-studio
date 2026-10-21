@@ -83,7 +83,7 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .shell { display: grid; grid-template-columns: var(--rail) var(--pane) 1fr; height: 100vh; }
 .shell.no-pane { grid-template-columns: var(--rail) 1fr; }
 .rail { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding: 12px 0 10px; gap: 4px; }
-.rail .logo { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; font-size: 20px; margin-bottom: 10px; background: linear-gradient(135deg, #ff6a3d, #ffa26b); color: #fff; box-shadow: 0 2px 8px rgba(255, 106, 61, .35); }
+.rail .logo { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; font-size: 20px; margin-bottom: 10px; background: transparent; }
 .rail button { width: 42px; height: 42px; border-radius: 12px; border: 0; background: transparent; color: var(--fg-muted); cursor: pointer; display: grid; place-items: center; position: relative; }
 .rail button:hover { background: var(--bg-subtle); color: var(--fg); }
 .rail button.active { background: var(--card); color: var(--fg); box-shadow: inset 0 0 0 1px var(--border); }
@@ -143,7 +143,7 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .turn-user { display: flex; justify-content: flex-end; gap: 10px; }
 .turn-user .bubble { max-width: 78%; background: var(--user-bubble); border-radius: 18px 18px 4px 18px; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .turn-user .bubble img { display: block; max-width: 320px; border-radius: 10px; margin-top: 8px; }
-.turn-user .av { width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(135deg, #ff6a3d, #ffa26b); color: #fff; display: grid; place-items: center; flex: none; font-size: 14px; }
+.turn-user .av { width: 30px; height: 30px; border-radius: 50%; background: transparent; display: grid; place-items: center; flex: none; font-size: 14px; }
 .turn-ai { display: flex; gap: 12px; }
 .turn-ai .av { width: 30px; height: 30px; border-radius: 50%; background: var(--card); border: 1px solid var(--border); display: grid; place-items: center; flex: none; font-size: 15px; }
 .turn-ai .body { min-width: 0; flex: 1; }
@@ -373,14 +373,17 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .tool.stale summary .dot { background: var(--fg-3); animation: none; }
 
 /* ---- v0.5 look: dark by default, display face for titles, an abstract mark instead of emoji, restrained neon on dark */
+/* SUIT Variable, served from this server (no CDN): one geometric family for Latin and Hangul, 100-900 */
+@font-face { font-family: "SUIT Variable"; font-weight: 100 900; font-style: normal; font-display: swap; src: url("/static/vendor/fonts/SUIT-Variable.woff2") format("woff2"); }
 :root {
-  /* Pretendard carries Latin and Hangul in one family (the usual pick in Korean products today); Space Grotesk only for Latin titles, Hangul titles fall back to Pretendard */
-  --font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
-  --display: "Space Grotesk", "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, "Pretendard Variable", monospace;
+  --font: "SUIT Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --display: "SUIT Variable", -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, "SUIT Variable", monospace;
 }
-body { letter-spacing: -0.005em; } .wordmark, .page h1, .pane-head h2 { font-weight: 700; }
-:lang(ko) .pane-head h2, :lang(ko) .page h1, :lang(ko) .empty h3 { letter-spacing: -0.02em; }
+body { letter-spacing: -0.012em; font-weight: 450; }
+.pane-head h2, .page h1, .empty h3, .modal header h3, .card h3, .wordmark { font-weight: 800; letter-spacing: -0.025em; }
+.topbar .picker .name, .pane-item .title, .turn-ai .head .name, .btn, .chip { font-weight: 600; }
+.wordmark { font-size: 22px; } .empty h3 { font-size: 22px; }
 .pane-head h2, .page h1, .empty h3, .modal header h3, .login h1, .snav h2, .card h3, .wordmark { font-family: var(--display); letter-spacing: -.01em; }
 .wordmark { font-weight: 700; font-size: 21px; letter-spacing: -.02em; }
 .wordmark em { font-style: normal; margin-left: 1px; background: linear-gradient(90deg, #22d3ee, #8b5cf6 55%, #ec4899); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -420,3 +423,7 @@ img.mark { display: block; border-radius: 50%; object-fit: cover; box-shadow: 0 
 .empty .big img.mark { width: 64px; height: 64px; }
 :root[data-theme="dark"] .rail .logo img.mark, :root[data-theme="dark"] .empty .big img.mark { box-shadow: 0 0 0 1px rgba(139, 124, 255, .35), 0 0 18px rgba(139, 124, 255, .28); }
 .rail .logo svg, .empty .big svg { filter: none; }
+
+/* my avatar as a photo (admin sessions); no orange anywhere */
+.avatar.photo { padding: 0; background: none; object-fit: cover; box-shadow: 0 0 0 1px rgba(255, 255, 255, .1); }
+.turn-user .av { background: transparent; }

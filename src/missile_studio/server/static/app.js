@@ -141,7 +141,8 @@
     const h = hue(n);
     return el('span', { class: 'avatar' + (size ? ' ' + size : ''), style: `--a1: hsl(${h} 72% 58%); --a2: hsl(${(h + 48) % 360} 72% 46%)`, title: n }, initials);
   }
-  const userAvatar = () => el('span', { class: 'avatar', style: '--a1:#f59e0b;--a2:#ec4899', title: 'you' }, I('users', 'sm'));
+  // my messages: the owner's photo for admin sessions, otherwise the account's initials (cool tones, no orange)
+  const userAvatar = () => (S.me && S.me.role === 'admin') ? el('img', { class: 'avatar photo', src: '/static/brand/avatar.png?v=2', alt: '', title: S.me.username || 'me', draggable: 'false' }) : el('span', { class: 'avatar', style: '--a1:#60a5fa;--a2:#8b5cf6', title: S.me?.username || 'me' }, (S.me?.username || 'me').slice(0, 2).toUpperCase());
   async function loadState() { S.st = await api('/api/state'); }
   async function loadConvs() { S.convs = await api('/api/conversations'); }
   const providerOf = (id) => S.st.providers.find((p) => p.id === id);
@@ -942,6 +943,7 @@
   async function boot() {
     try { const h = await fetch('/api/health', { headers: headers() }).then((r) => r.json()); S.health = h; if (h.auth_required && !token && !h.signed_in) return showLogin(); } catch {}
     try { await loadState(); await loadConvs(); } catch (e) { if (e.message !== 'unauthorized') toast(e.message, true); return; }
+    try { S.me = await api('/api/admin/auth/me'); } catch { S.me = null; }  // who am I (username, role) for avatars and the session card
     $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
     if (!S.st.providers.length) { S.view = 'settings'; S.settingsPage = 'providers'; }
     render();
