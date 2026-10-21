@@ -49,7 +49,7 @@ def _mask(pc: ProviderConfig) -> dict:
         d["api_key"] = (k[:4] + "…" + k[-4:]) if len(k) > 10 else "…"
         d["has_key"] = True
     else:
-        d["has_key"] = bool(pc.api_key_env)
+        d["has_key"] = bool(pc.resolved_api_key())  # an env var NAME alone is not a key: only true when the variable has a value
     if d.get("password"):
         d["password"] = "…"
         d["has_password"] = True

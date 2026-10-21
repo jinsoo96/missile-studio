@@ -172,3 +172,14 @@ def test_stop_during_tool_closes_pending_calls(client):
         events = read_sse(resp)
     assert events[-1]["finish_reason"] == "stop"
     assert [m["role"] for m in FakeProvider.seen[-1]] == ["system", "user", "assistant", "tool", "tool", "user"]
+
+
+def test_has_key_reflects_a_resolvable_key(client, monkeypatch):
+    """has_key is true only when a key value exists: inline, or in the named env var when that var is set."""
+    client.post("/api/providers", json={"id": "envp", "kind": "openai", "base_url": "https://x.invalid/v1", "api_key": "", "api_key_env": "MISSILE_TEST_KEY"}, headers=H)
+    p = next(p for p in client.get("/api/providers", headers=H).json() if p["id"] == "envp")
+    assert p["has_key"] is False
+    monkeypatch.setenv("MISSILE_TEST_KEY", "sk-test")
+    p = next(p for p in client.get("/api/providers", headers=H).json() if p["id"] == "envp")
+    assert p["has_key"] is True
+    client.delete("/api/providers/envp", headers=H)
