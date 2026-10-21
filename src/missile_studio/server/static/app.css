@@ -371,3 +371,38 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 
 /* tool card: no result and nothing running (stopped turn) -> grey, no blink */
 .tool.stale summary .dot { background: var(--fg-3); animation: none; }
+
+/* ---- v0.5 look: dark by default, display face for titles, an abstract mark instead of emoji, restrained neon on dark */
+:root { --display: "Space Grotesk", "Inter", "Pretendard", -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace; }
+.pane-head h2, .page h1, .empty h3, .modal header h3, .login h1, .snav h2, .card h3, .wordmark { font-family: var(--display); letter-spacing: -.01em; }
+.wordmark { font-weight: 700; font-size: 21px; letter-spacing: -.02em; }
+.wordmark em { font-style: normal; margin-left: 1px; background: linear-gradient(90deg, #22d3ee, #8b5cf6 55%, #ec4899); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.logo-slot { display: inline-flex; } .logo-slot svg, .rail .logo svg, .empty .big svg { display: block; }
+.rail .logo { background: transparent; box-shadow: none; border-radius: 0; width: 34px; height: 34px; }
+.rail .logo svg { width: 34px; height: 34px; filter: drop-shadow(0 0 10px rgba(139, 92, 246, .35)); }
+.avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none; color: #fff; font: 600 11.5px/1 var(--display); letter-spacing: .03em; background: linear-gradient(135deg, var(--a1, #22d3ee), var(--a2, #8b5cf6)); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); }
+.avatar.emoji { background: var(--bg-subtle); color: var(--fg); font-size: 15px; box-shadow: none; }
+.avatar.sm { width: 22px; height: 22px; font-size: 9.5px; } .avatar.sm.emoji { font-size: 12px; }
+.avatar .i { width: 14px; height: 14px; }
+.pane-item .em, .turn-ai .av, .turn-user .av, .asst .em, .lrow .em { background: transparent; border: 0; box-shadow: none; padding: 0; overflow: visible; }
+.empty .big { display: flex; justify-content: center; } .empty .big svg { filter: drop-shadow(0 0 18px rgba(139, 92, 246, .35)); }
+.login form { gap: 14px; } .login h1 { gap: 12px; }
+/* dark: deep slate with a violet accent; glow only where it guides the eye */
+:root[data-theme="dark"] {
+  --bg: #0b0d12; --bg-subtle: #12151c; --card: #141821; --popover: #171b25; --sidebar: #0e1016;
+  --fg: #e6e8ef; --fg-muted: #9aa3b2; --fg-3: #6b7383; --fg-disabled: #434a58;
+  --border: #212634; --border-strong: #2f3647; --input: #0f1218; --ring: #8b7cff;
+  --primary: #8b7cff; --primary-fg: #0b0d12; --primary-soft: #221f3f;
+  --link: #7cc4ff; --destructive: #ff6b7a; --destructive-soft: #3a1c26;
+  --success: #34d399; --success-soft: #112e25; --warning: #fbbf24; --warning-soft: #3a2d10; --info: #60a5fa; --info-soft: #172338;
+  --user-bubble: #1a2030; --code-bg: #0f1218;
+  --shadow-pop: 0 12px 36px rgba(0, 0, 0, .6), 0 1px 3px rgba(0, 0, 0, .5);
+}
+:root[data-theme="dark"] .btn.primary, :root[data-theme="dark"] .composer .send { box-shadow: 0 0 0 1px rgba(139, 124, 255, .35), 0 4px 18px rgba(139, 124, 255, .22); }
+:root[data-theme="dark"] .btn.primary:hover, :root[data-theme="dark"] .composer .send:hover { box-shadow: 0 0 0 1px rgba(139, 124, 255, .6), 0 6px 24px rgba(139, 124, 255, .35); }
+:root[data-theme="dark"] .composer:focus-within { border-color: rgba(139, 124, 255, .55); box-shadow: 0 0 0 1px rgba(139, 124, 255, .25), 0 0 28px rgba(139, 124, 255, .14); }
+:root[data-theme="dark"] .pane-col.active-pane { box-shadow: inset 0 0 0 1px rgba(139, 124, 255, .35); }
+:root[data-theme="dark"] .rail button.active { color: #c4b5fd; background: var(--primary-soft); }
+:root[data-theme="dark"] .login { background: radial-gradient(900px 520px at 72% -10%, rgba(139, 92, 246, .20), transparent 60%), radial-gradient(700px 420px at 8% 110%, rgba(34, 211, 238, .12), transparent 60%), var(--bg); }
+:root[data-theme="dark"] .login form { background: linear-gradient(180deg, #141821, #10131b); border-color: #262c3b; box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 0 0 1px rgba(139, 124, 255, .08); }
+:root[data-theme="dark"] .tool.run summary .dot { background: #c4b5fd; }

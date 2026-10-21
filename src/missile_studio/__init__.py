@@ -4,4 +4,4 @@ Web UI and terminal share one engine, so the same configuration works on a lapto
 over SSH on a headless server, or behind a tunnel.
 """
 
-__version__ = "0.4.5"
+__version__ = "0.5.0"

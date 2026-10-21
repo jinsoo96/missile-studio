@@ -96,7 +96,7 @@ def test_owner_token_is_admin_and_tokens_have_scopes(client):
     assert client.get("/api/state", headers=H_chat).status_code == 200
     assert client.post("/api/conversations", json={}, headers=H_chat).status_code == 200
     assert client.post("/api/providers", json={"id": "x", "kind": "openai"}, headers=H_chat).status_code == 403
-    assert client.get("/api/admin/overview", headers=H_chat).status_code == 401
+    assert client.get("/api/admin/overview", headers=H_chat).status_code == 403  # signed in, but not an admin
     # admin scope: everything
     assert client.get("/api/admin/overview", headers=H_admin).status_code == 200
     assert client.put("/api/policy", json={"default": "ask", "read_only_default": "allow", "rules": {}}, headers=H_admin).status_code == 200
@@ -206,3 +206,39 @@ def test_studio_login_with_admin_account_and_remember_me(client):
     # without remember the session is the short one
     r = client.post("/api/admin/auth/login", json={"username": "admin", "password": pw})
     assert r.json()["expires_in"] == adminmod.SESSION_TTL
+
+
+def test_signup_modes_and_user_role(client):
+    """Sign-up on the login page: invite code by default, new accounts are chat-only users, admins can close or open it."""
+    st = client.app.state.store
+    assert client.get("/api/health").json()["signup"] == "invite"
+    code = st.get_setting("signup_invite_code")
+    assert code and len(code) >= 6
+    assert client.post("/api/admin/auth/signup", json={"username": "Mina!", "password": "longenough1", "invite_code": code}).status_code == 400
+    assert client.post("/api/admin/auth/signup", json={"username": "mina", "password": "short", "invite_code": code}).status_code == 400
+    assert client.post("/api/admin/auth/signup", json={"username": "mina", "password": "longenough1", "invite_code": "nope"}).status_code == 403
+    r = client.post("/api/admin/auth/signup", json={"username": "Mina", "password": "longenough1", "invite_code": code, "remember": True})
+    assert r.status_code == 200 and r.json() == {"username": "mina", "role": "user", "expires_in": adminmod.REMEMBER_TTL}
+    # a studio user: chats yes, settings and the admin console no
+    assert client.get("/api/state").json()["role"] == "user"
+    assert client.get("/api/admin/auth/me").json()["role"] == "user"
+    assert client.get("/api/admin/overview").status_code == 403
+    assert client.put("/api/policy", json={"default": "allow", "read_only_default": "allow", "rules": {}}, headers=CSRF).status_code == 403
+    assert client.post("/api/conversations", json={}, headers=CSRF).status_code == 200
+    client.cookies.clear()
+    assert client.post("/api/admin/auth/signup", json={"username": "mina", "password": "longenough1", "invite_code": code}).status_code == 409
+    # the admin closes sign-up, then opens it without a code
+    assert client.put("/api/admin/settings", json={"changes": {"signup_mode": "off"}}, headers=OWNER).status_code == 200
+    assert client.get("/api/health").json()["signup"] == "off"
+    assert client.post("/api/admin/auth/signup", json={"username": "bob", "password": "longenough1"}).status_code == 403
+    client.put("/api/admin/settings", json={"changes": {"signup_mode": "open"}}, headers=OWNER)
+    assert client.post("/api/admin/auth/signup", json={"username": "bob", "password": "longenough1"}).status_code == 200
+    client.cookies.clear()
+    roles = {u["username"]: u["role"] for u in client.get("/api/admin/users", headers=OWNER).json()}
+    assert roles["admin"] == "admin" and roles["mina"] == "user" and roles["bob"] == "user"
+    # an admin can create an admin account explicitly
+    r = client.post("/api/admin/users", json={"username": "ops", "password": "longenough1", "role": "admin"}, headers=OWNER)
+    assert r.status_code == 200 and r.json()["role"] == "admin"
+    r = client.post("/api/admin/auth/login", json={"username": "ops", "password": "longenough1"})
+    assert r.status_code == 200 and r.json()["role"] == "admin"
+    assert client.get("/api/admin/overview").status_code == 200

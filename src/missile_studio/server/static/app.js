@@ -85,7 +85,28 @@
     const ct = r.headers.get('content-type') || '';
     return ct.includes('json') ? r.json() : r.text();
   }
-  function showLogin() { $('#login').classList.remove('hidden'); $('#app').classList.add('hidden'); }
+  function showLogin() {
+    $('#login').classList.remove('hidden'); $('#app').classList.add('hidden');
+    const mode = (S.health && S.health.signup) || 'off';
+    $('#toSignup').classList.toggle('hidden', mode === 'off');
+    $('#suInvite').classList.toggle('hidden', mode !== 'invite');
+  }
+  document.querySelectorAll('.logo-slot').forEach((s) => { s.innerHTML = window.logoMark(28); });
+  const swapAuth = (signup) => { $('#loginForm').classList.toggle('hidden', signup); $('#signupForm').classList.toggle('hidden', !signup); $('#loginErr').textContent = ''; $('#suErr').textContent = ''; };
+  $('#toSignupLink').addEventListener('click', (e) => { e.preventDefault(); swapAuth(true); setTimeout(() => $('#suUser').focus(), 0); });
+  $('#toLoginLink').addEventListener('click', (e) => { e.preventDefault(); swapAuth(false); });
+  $('#signupForm').addEventListener('submit', async (e) => {
+    e.preventDefault(); const err = $('#suErr'); err.textContent = '';
+    if ($('#suPass').value !== $('#suPass2').value) { err.textContent = 'The passwords differ.'; return; }
+    try {
+      token = ''; localStorage.removeItem('missile_token');
+      await api('/api/admin/auth/signup', { method: 'POST', body: { username: $('#suUser').value.trim(), password: $('#suPass').value, invite_code: $('#suInvite').value.trim(), remember: true } });
+      swapAuth(false); $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); await boot();
+    } catch (e2) {
+      const m = e2.message || '';
+      err.textContent = m === 'bad_invite_code' ? 'That invite code is not right.' : m === 'username_taken' ? 'That username is taken.' : m === 'signup_closed' ? 'Sign-up is closed.' : m === 'rate_limited' ? 'Too many attempts. Wait a minute.' : (m || 'Could not create the account.');
+    }
+  });
   $('#loginForm').addEventListener('submit', async (e) => {
     e.preventDefault(); const err = $('#loginErr'); err.textContent = '';
     const tokenVal = $('#loginToken').value.trim();
@@ -105,12 +126,22 @@
   const newPane = () => ({ id: Math.random().toString(36).slice(2, 8), convId: null, conv: null, messages: [], branches: {}, sel: {}, attachments: [], draft: '', editing: null, pendingEdit: null });
   const S = { st: null, convs: [], view: 'chat', settingsPage: 'providers', sel: {}, search: '', panes: [newPane()], active: 0, live: {}, linkInputs: false, artifacts: {},
     drawer: { open: false, tab: 'files', path: '.', entries: [], file: null, term: [], loading: false, artifact: null, aTab: 'preview', versions: null } };
-  const THEMES = ['light', 'dark', 'warm'];
+  const THEMES = ['dark', 'warm', 'light'];  // dark is the default look
   const theme = {
-    get: () => document.documentElement.getAttribute('data-theme') || '',
-    set(t) { if (t) document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme'); try { if (t) localStorage.setItem('missile_theme', t); else localStorage.removeItem('missile_theme'); } catch {} render(); },
-    toggle() { const cur = this.get() || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); this.set(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]); },
+    get: () => document.documentElement.getAttribute('data-theme') || 'dark',
+    set(t) { t = t || 'dark'; document.documentElement.setAttribute('data-theme', t); try { localStorage.setItem('missile_theme', t); } catch {} render(); },
+    toggle() { const cur = this.get(); this.set(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]); },
   };
+  // avatars: a custom emoji stays; the stock ones (🤖 🚀 💬) become initials on a gradient tile keyed by the name
+  const STOCK_EMOJI = new Set(['🤖', '🚀', '💬', '🧑', '']);
+  function avatarEl(name, emoji, size) {
+    if (emoji && !STOCK_EMOJI.has(emoji)) return el('span', { class: 'avatar emoji' + (size ? ' ' + size : '') }, emoji);
+    const n = String(name || '?').trim(); const parts = n.split(/\s+/).filter(Boolean);
+    const initials = (parts.length > 1 ? parts[0][0] + parts[1][0] : n.slice(0, 2)).toUpperCase();
+    const h = hue(n);
+    return el('span', { class: 'avatar' + (size ? ' ' + size : ''), style: `--a1: hsl(${h} 72% 58%); --a2: hsl(${(h + 48) % 360} 72% 46%)`, title: n }, initials);
+  }
+  const userAvatar = () => el('span', { class: 'avatar', style: '--a1:#f59e0b;--a2:#ec4899', title: 'you' }, I('users', 'sm'));
   async function loadState() { S.st = await api('/api/state'); }
   async function loadConvs() { S.convs = await api('/api/conversations'); }
   const providerOf = (id) => S.st.providers.find((p) => p.id === id);
@@ -151,14 +182,14 @@
     const btn = (name, icon, label, onclick) => el('button', { class: S.view === name || (name === 'settings' && S.view.startsWith('settings')) ? 'active' : '', onclick, 'aria-label': label }, I(icon), el('span', { class: 'tip' }, label));
     const cur = theme.get();
     return el('div', { class: 'rail' },
-      el('div', { class: 'logo' }, '🚀'),
+      el('div', { class: 'logo', html: window.logoMark(34), title: 'missile studio' }),
       btn('chat', 'chat', 'Chat', () => { S.view = 'chat'; render(); }),
       btn('assistants', 'sparkles', 'Assistants', () => { S.view = 'assistants'; render(); }),
       btn('settings', 'settings', 'Settings', () => { S.view = 'settings'; render(); }),
       el('div', { class: 'bottom' },
         el('button', { class: S.drawer.open ? 'active' : '', onclick: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }, 'aria-label': 'workspace' }, I('file'), el('span', { class: 'tip' }, 'Workspace · artifacts (Ctrl/⌘ J)')),
         el('button', { onclick: () => openPalette(), 'aria-label': 'search' }, I('search'), el('span', { class: 'tip' }, 'Search & commands (Ctrl/⌘ K)')),
-        el('button', { onclick: () => theme.toggle(), 'aria-label': 'theme' }, I(cur === 'dark' ? 'sun' : cur === 'warm' ? 'sparkles' : 'moon'), el('span', { class: 'tip' }, `Theme: ${cur || 'system'} → ${THEMES[(THEMES.indexOf(cur || 'light') + 1) % 3]}`)),
+        el('button', { onclick: () => theme.toggle(), 'aria-label': 'theme' }, I(cur === 'dark' ? 'moon' : cur === 'warm' ? 'sparkles' : 'sun'), el('span', { class: 'tip' }, `Theme: ${cur} → ${THEMES[(THEMES.indexOf(cur) + 1) % 3]}`)),
         el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': 'admin' }, I('shield'), el('span', { class: 'tip' }, 'Admin console'))));
   }
 
@@ -185,7 +216,7 @@
         const g = groupLabel(c.updated_at); if (g !== last) { list.append(el('div', { class: 'pane-group' }, g)); last = g; }
         const a = assistantOf(c.assistant_id); const running = !!S.live[c.id] || c.running;
         list.append(el('div', { class: 'pane-item' + (activePane().convId === c.id ? ' active' : ''), style: openIds.has(c.id) && activePane().convId !== c.id ? 'box-shadow: inset 0 0 0 1px var(--border)' : '', onclick: () => openConv(activePane(), c.id) },
-          el('div', { class: 'em' }, a?.emoji || '💬'),
+          el('div', { class: 'em' }, avatarEl(a?.name || 'Chat', a?.emoji)),
           el('div', { class: 'body' }, el('div', { class: 'title truncate' }, c.title || 'New chat'), el('div', { class: 'sub truncate' }, running ? 'running…' : (shortModel(c.model) || providerOf(c.provider_id)?.label || ''))),
           running ? el('span', { class: 'run', title: 'a turn is running' }) : el('button', { class: 'x', title: 'Delete', onclick: (e) => { e.stopPropagation(); deleteConv(c.id); } }, I('trash', 'xs'))));
       }
@@ -200,7 +231,7 @@
     pane.append(el('div', { class: 'pane-head' }, el('h2', {}, 'Assistants'), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; render(); } }, I('edit', 'sm'), 'Manage')));
     const list = el('div', { class: 'pane-list' }); pane.append(list);
     const cur = targetOf(activePane());
-    for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: () => setAssistant(activePane(), a.id) }, el('div', { class: 'em' }, a.emoji || '🤖'), el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
+    for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: () => setAssistant(activePane(), a.id) }, el('div', { class: 'em' }, avatarEl(a.name, a.emoji)), el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
     list.append(el('div', { style: 'padding:10px' }, el('button', { class: 'btn sm', style: 'width:100%', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), 'Add assistant')));
     return pane;
   }
@@ -248,7 +279,7 @@
   function renderPane(pane, idx) {
     const t = targetOf(pane);
     const col = el('div', { class: 'pane-col' + (idx === S.active && S.panes.length > 1 ? ' active-pane' : ''), onmousedown: () => focusPane(idx) });
-    const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px' }, el('span', { class: 'asst' }, el('span', { class: 'em' }, t.assistant?.emoji || '🤖'), S.panes.length > 1 ? null : (t.assistant?.name || 'Assistant')), I('chevron', 'xs'));
+    const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px' }, el('span', { class: 'asst' }, el('span', { class: 'em' }, avatarEl(t.assistant?.name || 'Assistant', t.assistant?.emoji, 'sm')), S.panes.length > 1 ? null : (t.assistant?.name || 'Assistant')), I('chevron', 'xs'));
     asstBtn.addEventListener('click', () => menu(asstBtn, S.st.assistants.map((a) => ({ label: a.name, sub: a.id, id: a.id, selected: a.id === t.aid })), { onPick: (it) => setAssistant(pane, it.id) }));
     const toolsOn = pane.sel.tools !== false;
     const toolsBtn = t.provider?.kind === 'agentserver' ? el('span', { class: 'chip info', title: 'tools run on the agent server' }, I('cloud', 'xs')) : el('button', { class: 'ico' + (toolsOn ? ' on' : ''), title: toolsOn ? `${S.st.tools.length} local tools on · click to turn off` : 'tools off · click to turn on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, I('wrench', 'sm'));
@@ -283,7 +314,7 @@
   }
   function assistantTurn(pane, modelName) {
     const t = targetOf(pane);
-    const node = el('div', { class: 'turn-ai' }, el('div', { class: 'av' }, t.assistant?.emoji || '🚀'));
+    const node = el('div', { class: 'turn-ai' }, el('div', { class: 'av' }, avatarEl(t.assistant?.name || 'Assistant', t.assistant?.emoji)));
     const body = el('div', { class: 'body' }); node.append(body);
     body.append(el('div', { class: 'head' }, el('span', { class: 'name' }, t.assistant?.name || 'Assistant'), el('span', { class: 'model' }, shortModel(modelName || t.model))));
     const content = el('div'); body.append(content);
@@ -322,7 +353,7 @@
     if (!pane.conv || (!pane.messages.length && !live)) {
       const t = targetOf(pane);
       const sugg = ['Summarize the files in my workspace', 'What tools do you have? Show one example each', 'Write a short project README from notes/', 'Build a small HTML page that visualizes a to-do list'];
-      inner.append(el('div', { class: 'empty' }, el('div', { class: 'big' }, t.assistant?.emoji || '🚀'), el('h3', {}, t.assistant?.name ? `Chat with ${t.assistant.name}` : 'What can I help with?'), el('div', {}, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model) || 'pick a model'} · ${S.st.tools.length} tools` : 'Add a provider in Settings to start.'), el('div', { class: 'sugg' }, sugg.map((s) => el('button', { onclick: () => { send(pane, s); } }, s)))));
+      inner.append(el('div', { class: 'empty' }, el('div', { class: 'big' }, STOCK_EMOJI.has(t.assistant?.emoji || '') ? el('span', { html: window.logoMark(56) }) : t.assistant.emoji), el('h3', {}, t.assistant?.name ? `Chat with ${t.assistant.name}` : 'What can I help with?'), el('div', {}, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model) || 'pick a model'} · ${S.st.tools.length} tools` : 'Add a provider in Settings to start.'), el('div', { class: 'sugg' }, sugg.map((s) => el('button', { onclick: () => { send(pane, s); } }, s)))));
       return;
     }
     const toolResults = {}; for (const m of pane.messages) if (m.role === 'tool') toolResults[m.tool_call_id] = { text: m.content, is_error: m.is_error, images: m.images, decision: m.decision, duration_ms: m.duration_ms };
@@ -341,7 +372,7 @@
         }
         const bub = el('div', { class: 'bubble' }, text);
         for (const p of (Array.isArray(m.content) ? m.content : [])) if (p.type === 'image_url') bub.append(el('img', { src: p.image_url.url }));
-        inner.append(el('div', { class: 'turn-user' }, el('span', { class: 'uact' }, el('button', { class: 'btn quiet icon sm', title: 'Edit and resend as a new branch', onclick: () => { pane.editing = m.id; render(); } }, I('edit', 'xs')), el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(text).then(() => toast('copied')) }, I('copy', 'xs'))), bub, el('div', { class: 'av' }, '🧑')));
+        inner.append(el('div', { class: 'turn-user' }, el('span', { class: 'uact' }, el('button', { class: 'btn quiet icon sm', title: 'Edit and resend as a new branch', onclick: () => { pane.editing = m.id; render(); } }, I('edit', 'xs')), el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(text).then(() => toast('copied')) }, I('copy', 'xs'))), bub, el('div', { class: 'av' }, userAvatar())));
         const nav = branchNav(pane, m.id); if (nav) inner.append(el('div', { class: 'bnav' }, nav));
         i++; continue;
       }
@@ -466,7 +497,7 @@
     if (!pane.conv) { try { pane.conv = await api('/api/conversations', { method: 'POST', body: { assistant_id: t.aid, provider_id: t.pid, model: t.model } }); } catch (e) { return toast(e.message, true); } pane.convId = pane.conv.id; pane.messages = []; pane.branches = {}; await loadConvs(); }
     const convId = pane.convId;
     if (opts.branchFrom) { const idx = pane.messages.findIndex((m) => m.id === opts.branchFrom); if (idx >= 0) pane.messages = pane.messages.slice(0, idx); }
-    const userNode = el('div', { class: 'turn-user' }, el('div', { class: 'bubble' }, text, ...atts.filter((a) => a.data_url).map((a) => el('img', { src: a.data_url }))), el('div', { class: 'av' }, '🧑'));
+    const userNode = el('div', { class: 'turn-user' }, el('div', { class: 'bubble' }, text, ...atts.filter((a) => a.data_url).map((a) => el('img', { src: a.data_url }))), el('div', { class: 'av' }, userAvatar()));
     const { node, content } = assistantTurn(pane, t.model);
     const live = { convId, node, userNode, content, abort: new AbortController(), textBuf: '', thinkBuf: '', mdEl: null, thinkEl: null, statusEl: null, cards: {} };
     S.live[convId] = live;
@@ -518,7 +549,7 @@
       { label: 'Toggle workspace drawer', sub: 'Ctrl/⌘ J', icon: 'file', run: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); } },
       { label: 'Artifacts', sub: 'generated code & documents', icon: 'box', run: () => openDrawer('artifacts') },
       { label: 'Link pane inputs', sub: S.linkInputs ? 'on' : 'off', icon: 'link', run: () => { S.linkInputs = !S.linkInputs; render(); } },
-      { label: 'Theme: light / dark / warm', sub: theme.get() || 'system', icon: 'moon', run: () => theme.toggle() },
+      { label: 'Theme: dark / warm / light', sub: theme.get(), icon: 'moon', run: () => theme.toggle() },
       { label: 'Settings · Model providers', icon: 'cloud', run: () => { S.view = 'settings'; S.settingsPage = 'providers'; render(); } },
       { label: 'Settings · MCP servers', icon: 'plug', run: () => { S.view = 'settings'; S.settingsPage = 'mcp'; render(); } },
       { label: 'Settings · Tools & policy', icon: 'wrench', run: () => { S.view = 'settings'; S.settingsPage = 'tools'; render(); } },
@@ -532,7 +563,7 @@
       const q = inp.value.trim(); const ql = q.toLowerCase(); list.innerHTML = ''; rows = [];
       const addRow = (node, run) => { const i = rows.length; rows.push({ node, run }); node.addEventListener('click', () => { close(); run(); }); node.addEventListener('mousemove', () => { hl = i; paint(); }); list.append(node); };
       const chats = S.convs.filter((c) => !ql || (c.title || '').toLowerCase().includes(ql)).slice(0, ql ? 12 : 6);
-      if (chats.length) { list.append(el('div', { class: 'grp' }, 'Chats')); for (const c of chats) addRow(el('div', { class: 'it' }, el('span', {}, assistantOf(c.assistant_id)?.emoji || '💬'), el('span', { class: 'truncate' }, c.title || 'New chat'), el('span', { class: 'sub' }, shortModel(c.model))), () => openConv(activePane(), c.id)); }
+      if (chats.length) { list.append(el('div', { class: 'grp' }, 'Chats')); for (const c of chats) { const a = assistantOf(c.assistant_id); addRow(el('div', { class: 'it' }, avatarEl(a?.name || 'Chat', a?.emoji, 'sm'), el('span', { class: 'truncate' }, c.title || 'New chat'), el('span', { class: 'sub' }, shortModel(c.model))), () => openConv(activePane(), c.id)); } }
       const acts = actions.filter((a) => !ql || (a.label + ' ' + (a.sub || '')).toLowerCase().includes(ql));
       if (acts.length) { list.append(el('div', { class: 'grp' }, 'Commands')); for (const a of acts) addRow(el('div', { class: 'it' }, I(a.icon, 'sm'), el('span', {}, a.label), a.sub ? el('span', { class: 'sub' }, a.sub) : null), a.run); }
       if (q) { list.append(el('div', { class: 'grp' }, 'Ask')); addRow(el('div', { class: 'it' }, I('send', 'sm'), el('span', { class: 'truncate' }, `Ask: ${q}`), el('span', { class: 'sub' }, 'Enter')), () => { S.view = 'chat'; render(); send(activePane(), q); }); }
@@ -861,7 +892,7 @@
     const ids = S.st.assistants.map((a) => a.id);
     const sel = S.sel.newAssistant ? null : (ids.includes(S.sel.assistantId) ? S.sel.assistantId : ids[0]);
     list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: () => { S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), 'New assistant')));
-    for (const a of S.st.assistants) list.append(el('div', { class: 'lrow' + (a.id === sel ? ' active' : ''), onclick: () => { S.sel.newAssistant = false; S.sel.assistantId = a.id; render(); } }, el('div', { class: 'em', style: 'background:var(--bg-subtle);color:var(--fg);font-size:16px' }, a.emoji || '🤖'), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, a.name), el('div', { class: 'sub truncate' }, a.model ? `${a.provider || 'default'} / ${shortModel(a.model)}` : 'default model')), S.st.default.assistant === a.id ? el('span', { class: 'chip primary' }, 'default') : null));
+    for (const a of S.st.assistants) list.append(el('div', { class: 'lrow' + (a.id === sel ? ' active' : ''), onclick: () => { S.sel.newAssistant = false; S.sel.assistantId = a.id; render(); } }, el('div', { class: 'em', style: 'background:transparent' }, avatarEl(a.name, a.emoji)), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, a.name), el('div', { class: 'sub truncate' }, a.model ? `${a.provider || 'default'} / ${shortModel(a.model)}` : 'default model')), S.st.default.assistant === a.id ? el('span', { class: 'chip primary' }, 'default') : null));
     const a = sel ? assistantOf(sel) : { id: '', name: '', emoji: '🤖', system_prompt: '', provider: '', model: '', tools: 'all', max_iterations: 25 };
     const d = { ...a, tools: Array.isArray(a.tools) ? a.tools.join(', ') : a.tools };
     const card = el('div', { class: 'card' },
@@ -897,8 +928,8 @@
   function pageGeneral(content) {
     const st = S.st;
     content.append(page('General', 'this studio', el('div', { class: 'card' }, el('h3', {}, 'Server'), el('div', { class: 'grid2' }, field('Version', el('div', {}, 'missile-studio ' + st.version)), field('Bound to', el('div', {}, `${st.server.host}:${st.server.port}` + (st.server.auth_required ? ' · token required' : ' · loopback, no token'))), field('Config file', el('code', {}, st.config_path)), field('Data folder', el('code', {}, st.home))), el('div', { class: 'muted tiny' }, 'Change host/port/token with ', el('code', {}, 'ms serve --host 0.0.0.0 --port 7700 --token …'), ' or ', el('code', {}, 'ms config set-token …'), '. The admin console at ', el('a', { href: '/admin', target: '_blank' }, '/admin'), ' manages tokens, logs, retention and system status.')),
-      st.server.auth_required ? el('div', { class: 'card' }, el('h3', {}, 'Session'), el('div', { class: 'muted tiny' }, S.health?.via === 'cookie' ? 'Signed in with an admin account (cookie session, shared with /admin).' : 'Signed in with an access token kept in this browser.'), el('div', {}, el('button', { class: 'btn', onclick: signOut }, I('x', 'sm'), 'Sign out'))) : null,
-      el('div', { class: 'card' }, el('h3', {}, 'Appearance'), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => theme.set('light') }, I('sun', 'sm'), 'Light'), el('button', { class: 'btn', onclick: () => theme.set('dark') }, I('moon', 'sm'), 'Dark'), el('button', { class: 'btn', onclick: () => theme.set('warm') }, I('sparkles', 'sm'), 'Warm'), el('button', { class: 'btn', onclick: () => theme.set('') }, 'System')), el('div', { class: 'muted tiny' }, 'Warm: cream paper, terracotta accents, serif headings.')),
+      st.server.auth_required ? (() => { const who = el('div', { class: 'muted tiny' }, S.health?.via === 'cookie' ? 'Signed in with an account (cookie session).' : 'Signed in with an access token kept in this browser.'); api('/api/admin/auth/me').then((me) => { who.textContent = `Signed in as ${me.username} · ${me.role}${me.role === 'admin' ? ' (the same session opens /admin)' : ' (chat only: settings belong to the admin)'}`; }).catch(() => {}); return el('div', { class: 'card' }, el('h3', {}, 'Session'), who, el('div', {}, el('button', { class: 'btn', onclick: signOut }, I('x', 'sm'), 'Sign out'))); })() : null,
+      el('div', { class: 'card' }, el('h3', {}, 'Appearance'), el('div', { class: 'row' }, el('button', { class: 'btn' + (theme.get() === 'dark' ? ' primary' : ''), onclick: () => theme.set('dark') }, I('moon', 'sm'), 'Dark'), el('button', { class: 'btn' + (theme.get() === 'warm' ? ' primary' : ''), onclick: () => theme.set('warm') }, I('sparkles', 'sm'), 'Warm'), el('button', { class: 'btn' + (theme.get() === 'light' ? ' primary' : ''), onclick: () => theme.set('light') }, I('sun', 'sm'), 'Light')), el('div', { class: 'muted tiny' }, 'Dark is the default. Warm: cream paper, terracotta accents, serif headings.')),
       el('div', { class: 'card' }, el('h3', {}, 'Keyboard'), el('div', {}, el('button', { class: 'btn', onclick: openShortcuts }, I('info', 'sm'), 'Show all shortcuts (Ctrl/⌘ /)'))),
       el('div', { class: 'card' }, el('h3', {}, 'Use this studio elsewhere'), el('div', { class: 'md', html: md('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for other MCP clients: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)') }))));
   }

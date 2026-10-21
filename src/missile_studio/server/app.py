@@ -142,8 +142,10 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             sess = request.cookies.get(adminmod.SESSION_COOKIE)
             if sess:
                 payload = adminmod.jwt_decode(sess)
-                if payload and payload.get("typ") == "admin" and store.get_admin(payload.get("sub", "")):
-                    p = {"role": "admin", "actor": payload["sub"], "via": "cookie"}
+                if payload and payload.get("typ") == "admin":
+                    acct = store.get_admin(payload.get("sub", ""))
+                    if acct:  # the role comes from the account row, so a demotion applies to live sessions too
+                        p = {"role": acct.get("role") or "admin", "actor": payload["sub"], "via": "cookie"}
         if p["role"] == "anon" and not tok:
             host = request.client.host if request.client else ""
             if host in LOOPBACK or engine.cfg.server.host in LOOPBACK:
@@ -178,6 +180,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         if created:
             app.state.bootstrap_password = created[1]
             print(f"admin console: username '{created[0]}'  password '{created[1]}'  -> change it at /admin (or: ms admin reset-password)", flush=True)
+        if not store.get_setting("signup_invite_code", ""):
+            store.set_setting("signup_invite_code", secrets.token_urlsafe(6))  # shown in /admin -> Settings -> access
+            store.event("info", "auth", "signup invite code generated", {}, actor="system")
         store.event("info", "system", "server started", {"version": __version__, "host": engine.cfg.server.host, "port": engine.cfg.server.port}, actor="system")
         app.state.retention_task = asyncio.create_task(adminmod.retention_loop(engine, store))
 
@@ -194,7 +199,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     @app.get("/api/health")
     async def health(request: Request):
         p = principal_of(request)  # lets the UI skip its login screen when a cookie session or token cookie is already valid
-        return {"ok": True, "version": __version__, "auth_required": bool(app.state.token), "signed_in": p["role"] != "anon", "via": p.get("via", ""), "home": str(home_dir()), "maintenance": bool(store.get_setting("maintenance_mode", False))}
+        return {"ok": True, "version": __version__, "auth_required": bool(app.state.token), "signed_in": p["role"] != "anon", "via": p.get("via", ""), "signup": str(store.get_setting("signup_mode", "invite") or "invite"), "home": str(home_dir()), "maintenance": bool(store.get_setting("maintenance_mode", False))}
 
     @app.post("/api/login")
     async def login(body: LoginIn):

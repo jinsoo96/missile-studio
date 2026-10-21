@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>missile-studio · admin</title>
-<link rel="stylesheet" href="/static/app.css?v=0.4.5">
-<script>try{var t=localStorage.getItem('missile_theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
-<script src="/static/icons.js?v=0.4.5"></script>
+<title>missile studio · admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css?v=0.5.0">
+<script>try{var t=localStorage.getItem('missile_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}</script>
+<script src="/static/icons.js?v=0.5.0"></script>
 <style>
   .admin { display: grid; grid-template-columns: 232px 1fr; height: 100vh; }
   .anav { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 14px 10px; }
@@ -44,6 +46,6 @@
 <body>
 <div id="app"></div>
 <div id="layer"></div>
-<script src="/static/admin.js?v=0.4.5"></script>
+<script src="/static/admin.js?v=0.5.0"></script>
 </body>
 </html>

@@ -109,7 +109,10 @@ class Store:
         return conn
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        """Add columns introduced after 0.1 (branching, styles). Idempotent."""
+        """Add columns introduced after 0.1 (branching, styles, account roles). Idempotent."""
+        acols = {r[1] for r in conn.execute("PRAGMA table_info(admin_users)").fetchall()}
+        if acols and "role" not in acols:
+            conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")  # admin | user (sign-ups)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "parent_id" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
@@ -272,18 +275,21 @@ class Store:
 
     # ---- admin users
     def list_admins(self) -> list[dict]:
-        return [dict(r) for r in self._conn().execute("SELECT id, username, must_change_password, created_at, last_login_at FROM admin_users ORDER BY id").fetchall()]
+        return [dict(r) for r in self._conn().execute("SELECT id, username, role, must_change_password, created_at, last_login_at FROM admin_users ORDER BY id").fetchall()]
 
     def get_admin(self, username: str) -> Optional[dict]:
         row = self._conn().execute("SELECT * FROM admin_users WHERE username=?", (username,)).fetchone()
         return dict(row) if row else None
 
-    def upsert_admin(self, username: str, password_hash: str, must_change: bool) -> None:
+    def upsert_admin(self, username: str, password_hash: str, must_change: bool, role: Optional[str] = None) -> None:
+        """Create or update an account. ``role`` is 'admin' (default for new rows) or 'user'; None keeps an existing role."""
         conn = self._conn()
         if conn.execute("SELECT 1 FROM admin_users WHERE username=?", (username,)).fetchone():
             conn.execute("UPDATE admin_users SET password_hash=?, must_change_password=? WHERE username=?", (password_hash, int(must_change), username))
+            if role:
+                conn.execute("UPDATE admin_users SET role=? WHERE username=?", (role, username))
         else:
-            conn.execute("INSERT INTO admin_users(username,password_hash,must_change_password,created_at) VALUES (?,?,?,?)", (username, password_hash, int(must_change), time.time()))
+            conn.execute("INSERT INTO admin_users(username,password_hash,must_change_password,created_at,role) VALUES (?,?,?,?,?)", (username, password_hash, int(must_change), time.time(), role or "admin"))
 
     def touch_admin_login(self, username: str) -> None:
         self._conn().execute("UPDATE admin_users SET last_login_at=? WHERE username=?", (time.time(), username))

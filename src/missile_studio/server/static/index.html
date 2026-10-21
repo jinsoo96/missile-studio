@@ -3,28 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>missile-studio</title>
-<link rel="stylesheet" href="/static/app.css?v=0.4.5">
-<script>try{var t=localStorage.getItem('missile_theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+<title>missile studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css?v=0.5.0">
+<script>try{var t=localStorage.getItem('missile_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}</script>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/icons.js?v=0.4.5"></script>
+<script src="/static/icons.js?v=0.5.0"></script>
 </head>
 <body>
 <div id="login" class="login hidden">
   <form id="loginForm">
-    <h1><span>🚀</span> missile-studio</h1>
-    <p class="muted" style="margin:0">Sign in with an admin account. The same session opens <code>/admin</code>.</p>
+    <h1><span class="logo-slot"></span><span class="wordmark">missile<em>studio</em></span></h1>
+    <p class="muted" style="margin:0">Sign in with your account. Admin sessions also open <code>/admin</code>.</p>
     <input id="loginUser" class="input" placeholder="username" autocomplete="username" value="admin">
     <input id="loginPass" class="input" type="password" placeholder="password" autocomplete="current-password">
     <label class="muted tiny" style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="loginRemember" type="checkbox" checked> Stay signed in on this browser (30 days)</label>
     <details><summary class="muted tiny" style="cursor:pointer">Use an access token instead</summary><input id="loginToken" class="input" type="password" placeholder="access token (ms serve printed it)" autocomplete="off" style="margin-top:8px"></details>
     <button type="submit" class="btn primary">Sign in</button>
     <div id="loginErr" class="muted tiny" style="color:var(--destructive)"></div>
+    <div id="toSignup" class="muted tiny hidden">No account? <a href="#" id="toSignupLink">Create one</a></div>
+  </form>
+  <form id="signupForm" class="hidden">
+    <h1><span class="logo-slot"></span><span class="wordmark">new <em>account</em></span></h1>
+    <p class="muted" style="margin:0">A studio account: chat with every model and tool. Settings stay with the admin.</p>
+    <input id="suUser" class="input" placeholder="username (letters, digits, . _ -)" autocomplete="username">
+    <input id="suPass" class="input" type="password" placeholder="password (8+ characters)" autocomplete="new-password">
+    <input id="suPass2" class="input" type="password" placeholder="repeat password" autocomplete="new-password">
+    <input id="suInvite" class="input" placeholder="invite code" autocomplete="off">
+    <button type="submit" class="btn primary">Create account</button>
+    <div id="suErr" class="muted tiny" style="color:var(--destructive)"></div>
+    <div class="muted tiny">Already have one? <a href="#" id="toLoginLink">Sign in</a></div>
   </form>
 </div>
 <div id="app"></div>
 <div id="layer"></div>
-<script src="/static/app.js?v=0.4.5"></script>
+<script src="/static/app.js?v=0.5.0"></script>
 </body>
 </html>

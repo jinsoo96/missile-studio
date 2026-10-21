@@ -162,6 +162,8 @@ DEFINITIONS: tuple[SettingDef, ...] = (
     SettingDef("workspace", "str", "", "tools", "Folder local tools are confined to (empty = <home>/workspace).", source="config"),
     SettingDef("server_token", "secret", "", "access", "Owner API token. Rotating it logs every browser out.", source="config"),
     SettingDef("login_rate_limit", "int", 10, "access", "Admin login attempts per minute per IP.", min=3, max=100),
+    SettingDef("signup_mode", "enum", "invite", "access", "Who can create an account on the sign-in page: off · invite (needs the code below) · open. New accounts are studio users, not admins.", choices=["off", "invite", "open"]),
+    SettingDef("signup_invite_code", "str", "", "access", "Code a visitor must enter to sign up while signup_mode is invite. Generated at startup when empty."),
     SettingDef("upload_max_mb", "int", 25, "general", "Largest attachment accepted by the chat.", min=1, max=500),
     SettingDef("retention_days", "int", 0, "retention", "Delete chats idle longer than this (0 = keep forever)."),
     SettingDef("event_retention_days", "int", 365, "retention", "Delete admin/system events older than this."),
@@ -436,6 +438,16 @@ class LoginIn(BaseModel):
     remember: bool = False  # 30-day session instead of 12h
 
 
+class SignupIn(BaseModel):
+    username: str
+    password: str
+    invite_code: str = ""
+    remember: bool = True
+
+
+USERNAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_.-")
+
+
 class PasswordIn(BaseModel):
     current_password: str
     new_password: str
@@ -453,6 +465,7 @@ class SettingsIn(BaseModel):
 class AdminIn(BaseModel):
     username: str
     password: str = ""
+    role: str = "admin"  # admin | user
 
 
 def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
@@ -465,8 +478,17 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
     def current_admin(request: Request) -> dict:
         p = principal_of(request)
         if p["role"] != "admin":
-            raise HTTPException(401, "unauthorized")
+            raise HTTPException(401 if p["role"] == "anon" else 403, "unauthorized" if p["role"] == "anon" else "admin only")
         return p
+
+    def _issue_session(response: Response, request: Request, user: dict, remember: bool) -> int:
+        """Set the session cookie for an account (admin or studio user). Returns the lifetime in seconds."""
+        ttl = REMEMBER_TTL if remember else SESSION_TTL
+        tok = jwt_encode({"sub": user["username"], "role": user.get("role") or "admin", "iat": int(time.time()), "exp": int(time.time() + ttl), "typ": "admin"})
+        secure = (request.headers.get("x-forwarded-proto") == "https") or request.url.scheme == "https"
+        response.set_cookie(SESSION_COOKIE, tok, httponly=True, samesite="lax", secure=secure, max_age=ttl, path="/")
+        store.touch_admin_login(user["username"])
+        return ttl
 
     def csrf_guard(request: Request) -> None:
         p = principal_of(request)
@@ -488,13 +510,37 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         if not user or not verify_password(body.password, user["password_hash"]):
             store.event("warn", "auth", "login failed", {"ip": ip, "username": body.username[:64]})
             raise HTTPException(401, "invalid_credentials")
-        ttl = REMEMBER_TTL if body.remember else SESSION_TTL
-        tok = jwt_encode({"sub": user["username"], "iat": int(time.time()), "exp": int(time.time() + ttl), "typ": "admin"})
-        secure = (request.headers.get("x-forwarded-proto") == "https") or request.url.scheme == "https"
-        response.set_cookie(SESSION_COOKIE, tok, httponly=True, samesite="lax", secure=secure, max_age=ttl, path="/")
-        store.touch_admin_login(user["username"])
+        ttl = _issue_session(response, request, user, body.remember)
         store.event("info", "auth", "login", {"ip": ip, "remember": bool(body.remember)}, actor=user["username"])
-        return {"username": user["username"], "mustChangePassword": bool(user["must_change_password"]), "expires_in": ttl}
+        return {"username": user["username"], "role": user.get("role") or "admin", "mustChangePassword": bool(user["must_change_password"]), "expires_in": ttl}
+
+    @r.post("/auth/signup")
+    async def signup(body: SignupIn, request: Request, response: Response):
+        """Self-service account on the sign-in page. Gated by the signup_mode setting; new accounts are studio users (no settings, no admin console)."""
+        mode = str(store.get_setting("signup_mode", "invite") or "invite")
+        if mode == "off":
+            raise HTTPException(403, "signup_closed")
+        limiter.limit = int(store.get_setting("login_rate_limit", 10) or 10)
+        ip = client_ip(request)
+        if not limiter.allow(ip):
+            raise HTTPException(429, "rate_limited")
+        username = body.username.strip().lower()
+        if not (3 <= len(username) <= 32 and set(username) <= USERNAME_CHARS and username[0].isalnum()):
+            raise HTTPException(400, "username: 3-32 characters, letters, digits, . _ -, starting with a letter or digit")
+        if len(body.password) < 8:
+            raise HTTPException(400, "password must be at least 8 characters")
+        if mode == "invite":
+            code = str(store.get_setting("signup_invite_code", "") or "")
+            if not code or not secrets.compare_digest(body.invite_code.strip(), code):
+                store.event("warn", "auth", "signup refused: bad invite code", {"ip": ip, "username": username})
+                raise HTTPException(403, "bad_invite_code")
+        if store.get_admin(username):
+            raise HTTPException(409, "username_taken")
+        store.upsert_admin(username, hash_password(body.password), must_change=False, role="user")
+        user = store.get_admin(username)
+        ttl = _issue_session(response, request, user, body.remember)
+        store.event("info", "auth", "signup", {"ip": ip, "mode": mode}, actor=username)
+        return {"username": username, "role": "user", "expires_in": ttl}
 
     @r.post("/auth/logout")
     async def logout(response: Response, request: Request):
@@ -505,10 +551,10 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
     @r.get("/auth/me")
     async def me(request: Request):
         p = principal_of(request)
-        if p["role"] != "admin":
+        if p["role"] == "anon":
             raise HTTPException(401, "unauthorized")
         user = store.get_admin(p["actor"]) if p.get("via") == "cookie" else None
-        return {"username": p["actor"], "via": p.get("via"), "mustChangePassword": bool(user["must_change_password"]) if user else False, "studio_name": store.get_setting("studio_name", "missile-studio")}
+        return {"username": p["actor"], "role": p["role"], "via": p.get("via"), "mustChangePassword": bool(user["must_change_password"]) if user else False, "studio_name": store.get_setting("studio_name", "missile-studio")}
 
     @r.post("/auth/password", dependencies=guarded)
     async def change_password(body: PasswordIn, request: Request):
@@ -533,9 +579,10 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
     async def upsert_user(body: AdminIn, request: Request):
         p = principal_of(request)
         pw = body.password or secrets.token_urlsafe(12)
-        store.upsert_admin(body.username.strip(), hash_password(pw), must_change=not body.password)
-        store.event("info", "auth", "admin user upserted", {"username": body.username}, actor=p["actor"])
-        return {"username": body.username, "password": pw if not body.password else None}
+        role = body.role if body.role in ("admin", "user") else "admin"
+        store.upsert_admin(body.username.strip(), hash_password(pw), must_change=not body.password, role=role)
+        store.event("info", "auth", "account upserted", {"username": body.username, "role": role}, actor=p["actor"])
+        return {"username": body.username, "role": role, "password": pw if not body.password else None}
 
     @r.delete("/users/{username}", dependencies=guarded)
     async def delete_user(username: str, request: Request):
