@@ -539,6 +539,9 @@
     }
   }
   setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } } catch {} }, 6000);
+  // a deployed update: when the server's version no longer matches the assets this tab loaded, reload (between turns) so nobody keeps an old UI
+  const LOADED_VERSION = (document.querySelector('script[src*="app.js"]')?.getAttribute('src') || '').split('v=')[1] || '';
+  setInterval(async () => { try { const h = await fetch('/api/health').then((r) => r.json()); if (LOADED_VERSION && h.version && h.version !== LOADED_VERSION && !Object.keys(S.live).length) { toast(`Updated to ${h.version}, reloading…`); setTimeout(() => location.reload(), 1200); } } catch {} }, 45000);
 
   // ---------------------------------------------------------------- palette (Ctrl/⌘ K) + shortcuts (Ctrl/⌘ /)
   function openPalette() {
