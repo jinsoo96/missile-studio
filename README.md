@@ -1,4 +1,4 @@
-# missile-studio 🚀
+# missile studio
 
 **Your own LLM studio.** Many model providers, your local MCP servers and remote agent servers in one
 place, driven by one agent loop. A web UI and a terminal UI share the same engine, so the same setup
@@ -19,9 +19,10 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
 
 ## Screenshots
 
-**Sign in.** Dark by default. Accounts have roles: admins run the studio, users chat. Sign-up on the
-login page can be closed, invite-only (default, with a code shown in the admin console) or open. A session
-lasts 30 days when you ask it to.
+**Sign in.** Dark by default, one geometric face for Latin and Hangul (SUIT, served by the studio itself, no
+font CDN), and your own picture as the mark and the tab icon (`static/brand/`, three files: replace them to
+rebrand). Accounts have roles: admins run the studio, users chat. Sign-up on the login page can be closed,
+invite-only (default, with a code shown in the admin console) or open. A session lasts 30 days when you ask it to.
 
 ![login](docs/screenshots/login.png)
 
