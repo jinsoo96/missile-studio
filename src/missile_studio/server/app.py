@@ -795,12 +795,12 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     @app.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
 
     @app.get("/admin")
     @app.get("/admin/{rest:path}")
     async def admin_index(rest: str = ""):
-        return FileResponse(STATIC / "admin.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(STATIC / "admin.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
 
     @app.get("/favicon.ico")
     async def favicon():
