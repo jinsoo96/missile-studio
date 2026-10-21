@@ -207,11 +207,17 @@
     await patchConv(pane, { provider_id: pid, model });
     render();
   }
+  const presetOf = (pane, t) => (S.st.model_presets || []).find((p) => p.id === pane.sel.preset && p.provider === t.pid && p.model === t.model);
   function modelPicker(pane) {
     const t = targetOf(pane);
-    const preset = (S.st.model_presets || []).find((p) => p.id === pane.sel.preset && p.provider === t.pid && p.model === t.model);
+    const preset = presetOf(pane, t);
     const pill = el('button', { class: 'picker', title: 'Choose model: quick presets first, then every model' }, el('span', { class: 'pv' }, preset ? preset.label : (t.provider?.label || t.pid || 'no provider').split(' ')[0]), el('span', { class: 'name truncate' }, shortModel(t.model) || 'pick a model'), I('chevron', 'xs'));
-    pill.addEventListener('click', () => {
+    pill.addEventListener('click', () => openModelMenu(pane, pill));
+    return pill;
+  }
+  // the same menu opens from the top-bar pill and from the model label in the composer
+  function openModelMenu(pane, anchor) {
+      const t = targetOf(pane); const preset = presetOf(pane, t);
       const items = [];
       if ((S.st.model_presets || []).length) {
         items.push({ group: 'Quick' });
@@ -224,9 +230,7 @@
         for (const m of models.slice(0, 400)) items.push({ label: shortModel(m), sub: p.id, pid: p.id, model: m, selected: !preset && p.id === t.pid && m === t.model });
       }
       if (!items.length) items.push({ label: 'Add a provider in Settings', sub: '', pid: '', model: '' });
-      menu(pill, items, { searchable: true, onPick: (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } applyTarget(pane, it.pid, it.model, it.thinking, it.presetId); } });
-    });
-    return pill;
+      menu(anchor, items, { searchable: true, onPick: (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } applyTarget(pane, it.pid, it.model, it.thinking, it.presetId); } });
   }
   const THINK_ORDER = ['', 'on', 'max', 'off'];
   function cycleThinking(pane) { pane.sel.thinking = THINK_ORDER[(THINK_ORDER.indexOf(pane.sel.thinking || '') + 1) % THINK_ORDER.length]; pane.sel.preset = null; render(); }
@@ -390,6 +394,8 @@
     });
     box.append(ta);
     const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { for (const f of e.target.files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } e.target.value = ''; renderPills(); } });
+    const modelBtn = el('button', { class: 'btn quiet sm modelbtn', title: 'Change model (same menu as the pill in the top bar)' }, el('span', { class: 'truncate' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : 'pick a model'), I('chevron', 'xs'));
+    modelBtn.addEventListener('click', () => openModelMenu(pane, modelBtn));
     const styleBtn = el('button', { class: 'btn quiet sm', title: 'Writing style' }, I('wand', 'sm'), t.style && t.style.id !== 'normal' ? t.style.name : 'Style');
     styleBtn.addEventListener('click', () => menu(styleBtn, (S.st.styles || []).map((s) => ({ label: s.name, sub: s.prompt ? s.prompt.slice(0, 40) + '…' : '', id: s.id, selected: s.id === (t.styleId || 'normal') })), { onPick: (it) => setStyle(pane, it.id) }));
     const bar = el('div', { class: 'bar' },
@@ -397,7 +403,7 @@
       el('button', { class: 'btn quiet icon sm', title: 'New chat in this pane (Ctrl/⌘ Shift O)', onclick: () => newConv(pane) }, I('plus', 'sm')),
       styleBtn,
       el('span', { class: 'spacer' }),
-      el('span', { class: 'muted tiny truncate', style: 'max-width:220px' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : ''),
+      modelBtn,
       live ? el('button', { class: 'stop', onclick: () => stopTurn(pane) }, I('stop', 'sm'), 'Stop') : el('button', { class: 'send', title: 'Send', onclick: () => send(pane), disabled: !t.provider }, I('send', 'sm')));
     box.append(bar); wrap.append(box);
     function renderPills() {
