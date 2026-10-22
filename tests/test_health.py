@@ -14,6 +14,14 @@ def _health(client, refresh=True):
     return client.get("/api/providers/health" + ("?refresh=1" if refresh else ""), headers=H).json()
 
 
+def _stop_periodic_probe(client):
+    """Tests that read health set by a live turn (refresh=False) must not race the server's own 120s background
+    probe loop, which would silently re-probe FakeProvider as 'ok' and clobber the state under test."""
+    t = getattr(client.app.state, "health_task", None)
+    if t:
+        t.cancel()
+
+
 def test_health_probe_classifies_providers(client):
     """A reachable server is ok, a dead port is down, a hosted API without a key is nokey; /api/state carries it all."""
     client.post("/api/providers", json=ProviderConfig(id="dead", kind="openai", label="Dead", base_url="http://127.0.0.1:1/v1", models=["x"], default_model="x").model_dump(), headers=H)
@@ -39,6 +47,7 @@ def test_health_without_refresh_reports_unknown_until_probed(client):
 
 def test_turns_update_health(client):
     """A turn that produced an answer marks its provider ok; one that died on a transport error marks it down."""
+    _stop_periodic_probe(client)
     conv = client.post("/api/conversations", json={}, headers=H).json()
     FakeProvider.script = [[{"type": "text_delta", "text": "hello"}, {"type": "done", "finish_reason": "stop"}]]
     with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "hi"}, headers=H) as r:
@@ -60,6 +69,7 @@ def test_turns_update_health(client):
 def test_a_failed_turn_marks_the_provider_down_immediately_without_waiting_for_a_5xx(client):
     """Before this fix only 5xx/connection-shaped errors marked a provider down from a live turn; a plain HTTP 404
     (a dead RunPod-style proxy, no backend at all) did not. Any provider-level error now counts."""
+    _stop_periodic_probe(client)
     conv = client.post("/api/conversations", json={}, headers=H).json()
     FakeProvider.script = [[{"type": "error", "message": "HTTP 404 from dead-pod-8000.proxy.runpod.net: (empty response body)"}]]
     with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "hi"}, headers=H) as r:
