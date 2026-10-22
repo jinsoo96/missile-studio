@@ -217,3 +217,32 @@ async def test_call_waits_for_a_reconnecting_server(tmp_path, monkeypatch):
     assert r["is_error"] and "try again" in r["text"] and "ping failed" in r["text"] and "unknown" not in r["text"]
     st.status, st.session, st.error = "connected", session, ""
     await mgr.configure({})
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_nudged_and_forced_answer_at_max_iterations(engine: Engine):
+    """A model that repeats the same tool call gets nudged, and when it still hits the tool-call limit the turn
+    ends with a real answer (one forced completion) instead of a bare tool call."""
+    await engine.start()
+    await engine.mcp.wait_ready(timeout=60)
+    engine.cfg.tool_policy.default = "allow"
+    engine.cfg.assistants[0].max_iterations = 4
+    poll = [{"type": "tool_call", "id": "p", "name": "echo__add", "arguments": {"a": 1, "b": 1}}, {"type": "done", "finish_reason": "tool_calls"}]
+    FakeProvider.script = [list(poll) for _ in range(4)] + [[{"type": "text_delta", "text": "The job is still running; ask again in a moment."}, {"type": "done", "finish_reason": "stop"}]]
+    FakeProvider.seen = []
+    conv = engine.store.create_conversation()
+    events = [ev async for ev in engine.run_turn(TurnRequest(conversation_id=conv["id"], user_text="is it done yet?"))]
+    assert any(e["type"] == "status" and e.get("event") == "max_iterations" for e in events)
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert len(results) == 4
+    # the nudge reaches the model (in what the 4th request carried), while the stored thread stays clean
+    sent4 = [m["content"] for m in FakeProvider.seen[3] if m.get("role") == "tool"]
+    assert any("same arguments 3 times" in c and "job_wait" in c for c in sent4)
+    tool_msgs = [m for m in engine.store.get_messages(conv["id"]) if m["role"] == "tool"]
+    assert all("same arguments" not in m["content"] for m in tool_msgs)
+    # the turn ends with a real assistant answer, flagged as the forced one
+    msgs = engine.store.get_messages(conv["id"])
+    assert msgs[-1]["role"] == "assistant" and "still running" in msgs[-1]["content"] and msgs[-1]["meta"].get("max_iterations") is True
+    assert events[-1]["type"] == "done" and events[-1]["finish_reason"] == "max_iterations"
+    assert "".join(e["text"] for e in events if e["type"] == "text_delta") == "The job is still running; ask again in a moment."
+    await engine.stop()

@@ -459,6 +459,12 @@ SUMMARY_PROMPT = (
     "names, open questions, and the tone the user prefers. Drop pleasantries and repeated content. Plain text, "
     "under 600 words, in the language the conversation uses."
 )
+FINAL_ANSWER_PROMPT = (
+    "You have reached the maximum number of tool calls for this turn, so no more tools will run. "
+    "Do not try to call another tool. Answer the user now, in plain text and in the language they used, "
+    "with your best conclusion from what you have gathered so far. If you were waiting on a background job, "
+    "say it is still running and how they can check on it (for example by asking again in a moment)."
+)
 
 
 def thinking_body(pcfg, model: str, level: str) -> dict:
@@ -885,6 +891,7 @@ class Engine:
         finish = "stop"
         iterations = 0
         pending: dict[str, dict] = {}  # tool calls of the current assistant message that have no result yet
+        seen_calls: dict[str, int] = {}  # (tool + args) -> how many times this turn, to catch a polling loop
         try:
             for iterations in range(1, max_iter + 1):
                 text_parts: list[str] = []
@@ -1105,6 +1112,13 @@ class Engine:
                         model_msg = _strip(tool_msg)
                         if len(model_msg.get("content") or "") > tool_cap:  # a small model gets the head; the thread keeps everything
                             model_msg["content"] = model_msg["content"][:tool_cap] + f"\n…[shortened for the model's context: {len(tool_msg['content']) - tool_cap} more chars; call the tool again narrower or with offset/limit for the rest]"
+                        key = c["name"] + "::" + json.dumps(args, ensure_ascii=False, sort_keys=True)
+                        seen_calls[key] = seen_calls.get(key, 0) + 1
+                        if seen_calls[key] >= 3:  # the same call over and over: usually polling a job that is not done yet
+                            model_msg["content"] = (model_msg.get("content") or "") + (
+                                f"\n[You have called {c['name']} with these same arguments {seen_calls[key]} times. Stop repeating it. "
+                                "If you are waiting for a background job, call job_wait once (it blocks until the job finishes) instead of polling job_status; "
+                                "if it is still running, tell the user it is still running and how to check on it, then end your turn.]")
                         messages.append(_promptify([model_msg])[0] if prompt_tools else model_msg)
                         # image tool results go to the model as a follow-up user message (only the latest image survives trimming)
                         if images:
@@ -1122,6 +1136,39 @@ class Engine:
             else:
                 yield {"type": "status", "event": "max_iterations", "data": {"max": max_iter}}
                 finish = "max_iterations"
+                # don't end the turn on a bare tool call with no answer: one more completion, no tools, forced to conclude
+                if calls:
+                    final_msgs, _ = _fit_messages(messages + [{"role": "user", "content": FINAL_ANSWER_PROMPT}], input_limit, force=True)
+                    final_parts: list[str] = []
+                    final_usage: Optional[dict] = None
+                    fscan = ToolCallScanner() if prompt_tools else None
+                    try:
+                        async for ev in provider.stream(model, final_msgs, None, options):
+                            et = ev.get("type")
+                            if et == "text_delta":
+                                shown = fscan.feed(ev["text"]) if fscan else ev["text"]
+                                if shown:
+                                    final_parts.append(shown)
+                                    yield {"type": "text_delta", "text": shown}
+                            elif et == "thinking_delta":
+                                yield ev
+                            elif et == "usage":
+                                final_usage = {k: v for k, v in ev.items() if k != "type"}
+                                yield ev
+                    except Exception as e:  # the forced answer is best-effort; the turn still ends cleanly
+                        log.warning("final answer after max_iterations failed: %s", e)
+                    if fscan:
+                        tail = fscan.flush()
+                        if tail:
+                            final_parts.append(tail)
+                            yield {"type": "text_delta", "text": tail}
+                    final_text = "".join(final_parts).strip()
+                    if final_text:
+                        fmsg: dict[str, Any] = {"role": "assistant", "content": final_text, "meta": {"provider": pid, "model": model, "max_iterations": True}}
+                        if final_usage:
+                            fmsg["meta"]["usage"] = final_usage
+                        self.store.append_message(req.conversation_id, fmsg)
+                        yield {"type": "message", "message": fmsg}
         except asyncio.CancelledError:
             # Stop pressed (or the client went away) while tools were still running: every call without a result
             # gets a terminal "cancelled" one, so the UI stops showing it as running and the thread stays valid.

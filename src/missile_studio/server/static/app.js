@@ -611,7 +611,7 @@
           else if (ev.event === 'tool_catalog') status(`tool catalog: ${(d.loaded || []).length} of ${d.total} tools defined · the model loads the rest as needed`);
           else if (ev.event === 'tools_loaded') status(`loaded tools: ${(d.names || []).map((n) => n.split('__').pop()).join(', ')}`);
           else if (ev.event === 'knowledge') status(`${(d.hits || []).length} knowledge excerpts in context${d.auto ? ' (automatic)' : ''}: ${(d.hits || []).map((h) => baseName(h.path)).slice(0, 4).join(', ')}`);
-          else if (ev.event === 'max_iterations') status('stopped: max iterations reached', true);
+          else if (ev.event === 'max_iterations') status('tool-call limit reached — answering with what it found', true);
           else if (ev.event === 'tools_unsupported') status('this model server cannot take tool definitions: switching to prompt-based tool calls', true);
           else if (ev.event === 'tools_via_prompt') status('tools go through the prompt on this server (no tool parser): calls are parsed from the text');
           else status(`${ev.event}…`, true);
