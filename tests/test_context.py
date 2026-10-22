@@ -80,3 +80,44 @@ def test_small_context_model_gets_short_tool_results_and_recovers_from_a_400(cli
     tool_sent = next(m for m in sent if m.get("role") == "tool")
     assert len(tool_sent["content"]) < 1700 and "shortened" in tool_sent["content"]  # ctx // 4 = 1000 -> floor 1500 chars + note
     assert "".join(e["text"] for e in events if e["type"] == "text_delta") == "fits now"
+
+
+def test_fold_turn_keeps_recent_steps_and_valid_pairs():
+    """One turn with many tool calls: the oldest steps fold into a one-line log, the newest two stay whole."""
+    from missile_studio.engine import _fold_turn
+
+    big = "가" * 600
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "do many things"}]
+    for i in range(10):
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "name": f"srv__tool{i}", "arguments": {"n": i}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "name": f"srv__tool{i}", "content": f"result {i} " + big})
+    before = _estimate_tokens(msgs)
+    out, changed = _fit_messages(msgs, 3000)
+    assert changed and _estimate_tokens(out) < before and _estimate_tokens(out) <= 3200
+    assert out[0]["role"] == "system" and out[1]["content"] == "do many things"
+    folded = out[2]
+    assert folded["role"] == "assistant" and "folded" in folded["content"] and "srv__tool0(" in folded["content"] and "result 0" in folded["content"]
+    # the last two call/result pairs are intact and every remaining call has its result
+    assert out[-1]["tool_call_id"] == "c9" and out[-3]["tool_call_id"] == "c8" and out[-2]["tool_calls"][0]["id"] == "c9"
+    ids = [c["id"] for m in out if m.get("tool_calls") for c in m["tool_calls"]]
+    assert all(any(m.get("tool_call_id") == cid for m in out) for cid in ids)
+    assert _fold_turn(msgs[:6], 10) == msgs[:6]  # two blocks or fewer: nothing to fold
+
+
+def test_long_tool_loop_on_a_small_model_folds_instead_of_failing(client):
+    client.put("/api/policy", json=ALLOW, headers=H)
+    client.post("/api/providers", json={"id": "fake", "kind": "fake", "context_window": 3000, "default_model": "fake-1"}, headers=H)
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    step = "가나다 " * 150  # ~600 chars per result
+    FakeProvider.script = [[{"type": "tool_call", "id": f"e{i}", "name": "echo__echo", "arguments": {"text": f"{i} " + step}}, {"type": "done", "finish_reason": "tool_calls"}] for i in range(8)]
+    FakeProvider.script.append([{"type": "text_delta", "text": "all done"}, {"type": "done", "finish_reason": "stop"}])
+    events = _chat(client, conv["id"], "loop a lot", tools=None)
+    assert not any(e["type"] == "error" for e in events) and events[-1]["finish_reason"] == "stop"
+    assert sum(1 for e in events if e["type"] == "tool_result") == 8
+    assert any(e.get("event") == "context_trimmed" for e in events)
+    last = FakeProvider.seen[-1]
+    assert any(m.get("role") == "assistant" and "folded" in str(m.get("content")) for m in last)
+    assert _estimate_tokens(last) <= 3000  # the floor is the system prompt + the two newest steps; it stays inside the window
+    # the stored thread still has every step
+    msgs = client.get(f"/api/conversations/{conv['id']}", headers=H).json()["messages"]
+    assert sum(1 for m in msgs if m["role"] == "tool") == 8

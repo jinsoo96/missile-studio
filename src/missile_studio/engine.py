@@ -272,13 +272,96 @@ def _fit_messages(messages: list[dict], limit: int, force: bool = False) -> tupl
             out[i] = {**m, "content": "(an image shown earlier was omitted to fit the model's context)"}
     while _estimate_tokens(out) > limit and len(out) > 3:
         # drop the oldest exchange: everything up to the next user message that starts a turn
-        nxt = next((i for i in range(2, len(out) - 1) if out[i].get("role") == "user" and not _is_tool_result(out[i])), None)
+        nxt = next((i for i in range(2, len(out) - 1) if _is_turn_start(out[i])), None)
         if nxt is None:
             break
         out = [out[0]] + out[nxt:]
         if out[1].get("role") == "user" and isinstance(out[1].get("content"), str) and not out[1]["content"].startswith("(earlier"):
             out[1] = {**out[1], "content": "(earlier messages were omitted to fit the model's context)\n\n" + out[1]["content"]}
+    if _estimate_tokens(out) > limit:
+        out = _fold_turn(out, limit)  # one long turn (many tool calls): fold its oldest steps into one-liners
+    if _estimate_tokens(out) > limit:  # still over: even the recent results get short, all but the newest message
+        for i in range(1, len(out) - 1):
+            m = out[i]
+            if _is_tool_result(m) and isinstance(m.get("content"), str) and len(m["content"]) > 900:
+                out[i] = {**m, "content": m["content"][:800] + note}
     return out, True
+
+
+def _is_turn_start(m: dict) -> bool:
+    """A real user message (not a tool response, not the image follow-up the engine adds after a tool)."""
+    if m.get("role") != "user" or _is_tool_result(m):
+        return False
+    c = m.get("content")
+    if isinstance(c, list):
+        first = next((p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text"), "")
+        return not first.startswith("(image returned by")
+    return not str(c or "").startswith("(an image shown earlier")
+
+
+def _call_names(m: dict) -> list[tuple[str, str]]:
+    """(name, arguments) of the tool calls an assistant message made, native or <tool_call> text."""
+    if m.get("tool_calls"):
+        return [(c.get("name", "?"), json.dumps(c.get("arguments") or {}, ensure_ascii=False)) for c in m["tool_calls"]]
+    out = []
+    for block in re.findall(re.escape(TOOL_CALL_OPEN) + r"(.*?)" + re.escape(TOOL_CALL_CLOSE), str(m.get("content") or ""), re.S):
+        try:
+            d = json.loads(block)
+            out.append((str(d.get("name", "?")), json.dumps(d.get("arguments") or {}, ensure_ascii=False)))
+        except Exception:
+            out.append(("?", ""))
+    return out
+
+
+def _result_line(m: dict, n: int = 200) -> str:
+    c = m.get("content")
+    s = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
+    if s.startswith("<tool_response>"):
+        try:
+            s = str(json.loads(s[len("<tool_response>") : s.rfind("</tool_response>")].strip()).get("result", s))
+        except Exception:
+            pass
+    return _short(s, n)
+
+
+def _fold_turn(out: list[dict], limit: int) -> list[dict]:
+    """Inside one turn with many tool calls: replace the oldest call/result blocks with a one-line log each (kept in a
+    single assistant message), newest two blocks stay whole. Call/result pairing stays valid for every provider."""
+    start = max((i for i, m in enumerate(out) if _is_turn_start(m)), default=0)
+    blocks: list[tuple[int, int]] = []  # [begin, end) ranges of assistant(call) + its results
+    i = start + 1
+    while i < len(out):
+        if out[i].get("role") == "assistant":
+            j = i + 1
+            while j < len(out) and out[j].get("role") != "assistant" and not _is_turn_start(out[j]):
+                j += 1
+            blocks.append((i, j))
+            i = j
+        else:
+            i += 1
+    if len(blocks) <= 2:
+        return out
+    folded_lines: list[str] = []
+    cut_end = blocks[0][0]
+    for k, (b, e) in enumerate(blocks[:-2]):
+        calls = _call_names(out[b])
+        results = [m for m in out[b:e] if _is_tool_result(m)]
+        for ci, (name, args) in enumerate(calls or [("(no tool call)", "")]):
+            res = _result_line(results[ci]) if ci < len(results) else ""
+            folded_lines.append(f"{len(folded_lines) + 1}. {name}({_short(args, 120)}) → {res}")
+        cut_end = e
+        trial = out[: blocks[0][0]] + [_folded_message(folded_lines)] + out[cut_end:]
+        if _estimate_tokens(trial) <= limit:
+            return trial
+    return out[: blocks[0][0]] + [_folded_message(folded_lines)] + out[cut_end:]
+
+
+def _folded_message(lines: list[str]) -> dict:
+    return {
+        "role": "assistant",
+        "content": "[Earlier steps of this turn, folded to fit the model's context (results shortened; call a tool again if a detail is needed). "
+        "The context is nearly full: finish with what is known, or ask the user before more lookups.]\n" + "\n".join(lines),
+    }
 
 
 @dataclass
