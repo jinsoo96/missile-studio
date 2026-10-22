@@ -129,7 +129,7 @@ async def test_anthropic_stream_tool_use():
     p = make(AnthropicProvider, ProviderConfig(id="a", kind="anthropic", api_key="k"), handler)
     msgs = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}]
     evs = await collect(p, messages=msgs, tools=[{"name": "echo__echo", "description": "e", "input_schema": {"type": "object", "properties": {}}}])
-    assert seen["body"]["system"] == "be brief"
+    assert seen["body"]["system"][0]["text"] == "be brief" and seen["body"]["system"][0]["cache_control"] == {"type": "ephemeral"}  # cached system block
     assert seen["headers"]["x-api-key"] == "k"
     assert "conversation_id" not in seen["body"]
     assert [e for e in evs if e["type"] == "tool_call"] == [{"type": "tool_call", "id": "toolu_1", "name": "echo__echo", "arguments": {"text": "ab"}}]

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -32,12 +33,33 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from .config import AssistantConfig, Config, ProviderConfig, load_config, save_config
 from .mcp.manager import SEP, McpManager, ToolInfo
 from .providers import BaseProvider, GenerationOptions, ProviderError, build_provider
-from .store import Store
+from .knowledge import Knowledge
+from .store import Store, _message_text
 from .tools.builtin import LOCAL, LocalTools, is_dangerous_command, match_rule
 
 log = logging.getLogger("missile.engine")
 
 APPROVAL_TIMEOUT = 600.0
+MAX_RETRIES = 3  # provider request attempts while nothing has been streamed yet (429, 5xx, connection errors)
+PARALLEL_TOOLS = 4  # tool calls of one assistant turn that may run at the same time
+COMPACT_KEEP_TAIL = 8  # messages kept verbatim when the rest of a long thread is summarised
+_RETRYABLE = re.compile(r"(\b429\b|\b5\d\d\b|rate.?limit|overloaded|timeout|timed out|connection|ConnectError|ReadError|RemoteProtocolError|temporarily|ECONNRESET)", re.I)
+_FATAL = re.compile(r"\b(400|401|402|403|404|413|422)\b")
+
+
+def _retryable(msg: str) -> bool:
+    return bool(_RETRYABLE.search(msg)) and not _FATAL.search(msg)
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Rough token count for budgeting (Korean and code run denser than English; 3 chars per token is a safe middle)."""
+    n = 0
+    for m in messages:
+        c = m.get("content")
+        n += len(c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)) // 3 + 8
+        if m.get("tool_calls"):
+            n += len(json.dumps(m["tool_calls"], ensure_ascii=False)) // 3
+    return n
 
 
 @dataclass
@@ -98,6 +120,24 @@ class TurnRequest:
     allow_dangerous: bool = False
     thinking: str = ""  # "" | off | on | max
     style_id: str = ""
+    mode: str = ""  # "" | research (plan searches, read sources, write a cited report; more iterations)
+    knowledge: bool = False  # retrieve knowledge-base excerpts for this message and put them in context
+
+
+RESEARCH_PROMPT = (
+    "Research mode. Work like a careful analyst: first break the question into 2-5 searchable sub-questions, "
+    "run web_search for each (vary the wording, prefer recent and primary sources), open the most promising "
+    "pages with fetch_url, and keep notes of what each source actually says. Then write the answer as a report: "
+    "a short conclusion first, then findings with inline citations like [1], [2] pointing to a numbered "
+    "Sources list at the end (title and URL). Say plainly where sources disagree or evidence is thin. "
+    "Do not stop after one search."
+)
+SUMMARY_PROMPT = (
+    "You compress conversation history for an assistant that will continue the chat. Write a dense summary that "
+    "keeps: the user's goals and constraints, decisions made, facts and numbers that were established, file paths, "
+    "names, open questions, and the tone the user prefers. Drop pleasantries and repeated content. Plain text, "
+    "under 600 words, in the language the conversation uses."
+)
 
 
 def thinking_body(pcfg, model: str, level: str) -> dict:
@@ -129,6 +169,8 @@ class Engine:
         self.mcp = McpManager(self.cfg.mcp_servers)
         bt = self.cfg.builtin_tools
         self.local = LocalTools(bt.workspace_path(), enable_shell=bt.shell, enable_fs=bt.filesystem, enable_web=bt.web)
+        self.knowledge: Optional[Knowledge] = None
+        self._register_extra_tools()
         self.approvals = Approvals()
         self.session_allow: dict[str, set[str]] = {}  # conversation -> tool names allowed for the session
         self.active_turns: dict[str, asyncio.Task] = {}
@@ -161,6 +203,7 @@ class Engine:
         await self.mcp.configure(cfg.mcp_servers)
         bt = cfg.builtin_tools
         self.local = LocalTools(bt.workspace_path(), enable_shell=bt.shell, enable_fs=bt.filesystem, enable_web=bt.web)
+        self._register_extra_tools()
 
     # ------------------------------------------------------------ providers
     def provider(self, pid: str) -> BaseProvider:
@@ -273,6 +316,75 @@ class Engine:
             )
         return "\n\n".join(parts)
 
+    # ------------------------------------------------------------ compaction (long threads)
+    def _apply_summary(self, conv: dict, history: list[dict]) -> tuple[list[dict], str]:
+        """Drop the messages a stored summary already covers, when that point lies on the current branch."""
+        upto = conv.get("summary_upto")
+        summary = conv.get("summary") or ""
+        if summary and upto:
+            idx = next((i for i, m in enumerate(history) if m.get("id") == upto), -1)
+            if idx >= 0:
+                return history[idx + 1 :], summary
+        return history, ""
+
+    async def _compact(self, cid: str, history: list[dict], summary: str, provider: BaseProvider, model: str) -> tuple[list[dict], str]:
+        """Fold everything but the last few messages into a summary written by the same model; keep the tail verbatim."""
+        if len(history) <= COMPACT_KEEP_TAIL + 2:
+            return history, summary
+        cut = len(history) - COMPACT_KEEP_TAIL
+        while cut > 0 and history[cut].get("role") != "user":
+            cut -= 1
+        if cut <= 0:
+            return history, summary
+        old, tail = history[:cut], history[cut:]
+        lines = []
+        for m in old:
+            body = _message_text(m) or (json.dumps(m.get("tool_calls"), ensure_ascii=False) if m.get("tool_calls") else "")
+            lines.append(f"{m.get('role')}: {body[:2000]}")
+        transcript = "\n".join(lines)[-60000:]
+        prompt = [{"role": "system", "content": SUMMARY_PROMPT}, {"role": "user", "content": (f"Previous summary:\n{summary}\n\n" if summary else "") + "Transcript to fold in:\n" + transcript}]
+        text = ""
+        try:
+            async for ev in provider.stream(model, prompt, None, GenerationOptions(max_tokens=1200, temperature=0.2)):
+                if ev.get("type") == "text_delta":
+                    text += ev["text"]
+                elif ev.get("type") == "error":
+                    log.warning("compaction skipped: %s", ev.get("message"))
+                    return history, summary
+        except Exception as e:  # keep going uncompacted rather than fail the turn
+            log.warning("compaction failed: %s", e)
+            return history, summary
+        text = text.strip()
+        if not text:
+            return history, summary
+        self.store.update_conversation(cid, summary=text, summary_upto=old[-1]["id"])
+        return tail, text
+
+    # ------------------------------------------------------------ extra local tools (memory, knowledge, web search config)
+    def _register_extra_tools(self) -> None:
+        self.local.web_search_cfg = self.cfg.builtin_tools.web_search
+        self.knowledge = Knowledge(self.store, lambda: self.cfg.knowledge, self.cfg.provider)
+        if self.cfg.memory.enabled:
+            self.local._add("memory_save", "Remember a durable fact about the user or their work for future chats (preferences, names, decisions, ongoing projects). Writes only to the memory list, never to files.", {"type": "object", "properties": {"text": {"type": "string"}, "tags": {"type": "string", "default": ""}}, "required": ["text"]}, self._tool_memory_save, read_only=True)
+            self.local._add("memory_search", "Search what has been remembered about the user in earlier chats.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 8}}, "required": ["query"]}, self._tool_memory_search, read_only=True)
+        self.local._add("knowledge_search", "Search the user's knowledge base (indexed folders and files). Returns the best matching excerpts with their file paths.", {"type": "object", "properties": {"query": {"type": "string"}, "k": {"type": "integer", "default": 6}}, "required": ["query"]}, self._tool_knowledge_search, read_only=True)
+
+    def _tool_memory_save(self, text: str, tags: str = "") -> str:
+        m = self.store.add_memory(text, source="tool", tags=tags)
+        return f"remembered ({m['id']}): {m['text']}"
+
+    def _tool_memory_search(self, query: str, limit: int = 8) -> str:
+        rows = self.store.search_memories(query, limit) or self.store.list_memories(limit)
+        return "\n".join(f"- ({r['id']}) {r['text']}" for r in rows) or "nothing remembered yet"
+
+    async def _tool_knowledge_search(self, query: str, k: int = 6) -> str:
+        if self.knowledge is None:
+            return "knowledge base not available"
+        hits = await self.knowledge.search(query, int(k or 6))
+        if not hits:
+            return f"no matches in the knowledge base for: {query}"
+        return "\n\n".join(f"[{i + 1}] {h['path']} (chunk {h['idx']}, score {h['score']:.2f})\n{h['text']}" for i, h in enumerate(hits))
+
     def _build_user_message(self, req: TurnRequest) -> dict:
         if not req.attachments:
             return {"role": "user", "content": req.user_text}
@@ -306,6 +418,12 @@ class Engine:
         tool_index = {t.full_name: t for t in tools}
 
         history = self.store.get_messages(req.conversation_id)
+        history, summary = self._apply_summary(conv, history)
+        budget = int((pcfg.context_tokens() if pcfg else 128_000) * 0.6)
+        if _estimate_tokens(history) > budget:
+            yield {"type": "status", "event": "compacting", "data": {"messages": len(history)}}
+            history, summary = await self._compact(req.conversation_id, history, summary, provider, model)
+            yield {"type": "status", "event": "compacted", "data": {"kept": len(history)}}
         user_msg = self._build_user_message(req)
         self.store.append_message(req.conversation_id, user_msg)
         yield {"type": "message", "message": user_msg}
@@ -316,6 +434,19 @@ class Engine:
         style = self.cfg.style(req.style_id or conv.get("style_id") or "")
         if style and style.prompt:
             system += "\n\nWriting style: " + style.prompt
+        if summary:
+            system += "\n\nEarlier part of this conversation, compacted into a summary:\n" + summary
+        if self.cfg.memory.enabled:
+            mems = self.store.search_memories(req.user_text, self.cfg.memory.recall_k)
+            if mems:
+                system += "\n\nThings remembered about the user from earlier chats (use when relevant, do not recite them):\n" + "\n".join(f"- {m['text']}" for m in mems)
+        if req.knowledge and self.knowledge is not None:
+            hits = await self.knowledge.search(req.user_text, self.cfg.knowledge.top_k)
+            if hits:
+                system += "\n\nExcerpts from the user's knowledge base (cite the path when you rely on one):\n" + "\n".join(f"[{i + 1}] {h['path']} (chunk {h['idx']}):\n{h['text'][:1500]}" for i, h in enumerate(hits))
+                yield {"type": "status", "event": "knowledge", "data": {"hits": [{"path": h["path"], "idx": h["idx"]} for h in hits]}}
+        if req.mode == "research":
+            system += "\n\n" + RESEARCH_PROMPT
         messages: list[dict] = [{"role": "system", "content": system}] + [_strip(m) for m in _repair_history(history)] + [user_msg]
         options = GenerationOptions(
             temperature=assistant.temperature if assistant else None,
@@ -332,6 +463,8 @@ class Engine:
                 options.max_tokens = max(options.max_tokens or 0, budget + 4000)
                 options.temperature = None  # the API requires the default temperature with thinking on
         max_iter = assistant.max_iterations if assistant else 25
+        if req.mode == "research":
+            max_iter = max(max_iter, 40)
         finish = "stop"
         iterations = 0
         pending: dict[str, dict] = {}  # tool calls of the current assistant message that have no result yet
@@ -339,36 +472,59 @@ class Engine:
             for iterations in range(1, max_iter + 1):
                 text_parts: list[str] = []
                 think_parts: list[str] = []
+                think_blocks: list[dict] = []
                 calls: list[dict] = []
                 had_error = False
                 error_text = ""
                 usage: Optional[dict] = None
                 t_iter = time.time()
-                async for ev in provider.stream(model, messages, llm_tools, options):
-                    et = ev.get("type")
-                    if et == "text_delta":
-                        text_parts.append(ev["text"])
-                        yield ev
-                    elif et == "thinking_delta":
-                        think_parts.append(ev["text"])
-                        yield ev
-                    elif et == "tool_call":
-                        calls.append(ev)
-                        yield ev
-                    elif et == "error":
-                        had_error = True
-                        error_text = str(ev.get("message", ""))[:600]
-                        yield ev
-                    elif et == "done":
-                        finish = ev.get("finish_reason", "stop")
-                    elif et == "usage":
-                        usage = {"input_tokens": ev.get("input_tokens", 0), "output_tokens": ev.get("output_tokens", 0)}
-                        yield ev
-                    else:
-                        yield ev
+                attempt = 0
+                while True:  # the request is retried while nothing has been produced yet (429, 5xx, connection errors)
+                    attempt += 1
+                    produced = False
+                    retry_wait = 0.0
+                    async for ev in provider.stream(model, messages, llm_tools, options):
+                        et = ev.get("type")
+                        if et == "text_delta":
+                            produced = True
+                            text_parts.append(ev["text"])
+                            yield ev
+                        elif et == "thinking_delta":
+                            produced = True
+                            think_parts.append(ev["text"])
+                            yield ev
+                        elif et == "thinking_block":
+                            think_blocks.append(ev.get("block") or {})
+                        elif et == "tool_call":
+                            produced = True
+                            calls.append(ev)
+                            yield ev
+                        elif et == "error":
+                            msg = str(ev.get("message", ""))[:600]
+                            if not produced and attempt < MAX_RETRIES and _retryable(msg):
+                                retry_wait = min(8.0, 1.5 ** attempt)
+                                error_text = msg
+                                break
+                            had_error = True
+                            error_text = msg
+                            yield ev
+                        elif et == "done":
+                            finish = ev.get("finish_reason", "stop")
+                        elif et == "usage":
+                            usage = {k: v for k, v in ev.items() if k != "type"}
+                            yield ev
+                        else:
+                            yield ev
+                    if retry_wait:
+                        yield {"type": "status", "event": "retry", "data": {"attempt": attempt, "wait": retry_wait, "reason": error_text[:200]}}
+                        await asyncio.sleep(retry_wait)
+                        continue
+                    break
                 assistant_msg: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
                 if think_parts:
                     assistant_msg["thinking"] = "".join(think_parts)
+                if think_blocks:
+                    assistant_msg["thinking_blocks"] = think_blocks
                 if calls:
                     assistant_msg["tool_calls"] = [{"id": c["id"], "name": c["name"], "arguments": c.get("arguments") or {}} for c in calls]
                 assistant_msg["meta"] = {"provider": pid, "model": model, "duration_ms": int((time.time() - t_iter) * 1000)}
@@ -390,53 +546,81 @@ class Engine:
                         yield {"type": "tool_result", "id": tm["tool_call_id"], "name": tm["name"], "is_error": True, "text": tm["content"], "duration_ms": 0, "decision": "cancelled", "images": []}
                         yield {"type": "message", "message": tm}
                     break
-                # execute tool calls sequentially (deterministic, approval-friendly)
+                # decide every call first (approvals are interactive, so they stay sequential), then run the allowed
+                # ones concurrently and hand results back as they finish
+                plan: list[tuple[dict, Any, str]] = []
                 for c in calls:
                     tool = tool_index.get(c["name"]) or self.mcp.find_tool(c["name"])
                     args = c.get("arguments") or {}
+                    if tool is None:
+                        plan.append((c, None, "block"))
+                        continue
+                    decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous)
+                    if decision == "ask":
+                        yield {"type": "approval_required", "id": c["id"], "name": c["name"], "arguments": args, "reason": reason}
+                        answer = await self.approvals.ask(req.conversation_id, c["id"], c["name"], args, reason)
+                        if answer == "allow_session":
+                            self.session_allow.setdefault(req.conversation_id, set()).add(tool.full_name)
+                            decision = "allow"
+                        elif answer == "allow_always":
+                            self.cfg.tool_policy.rules[tool.full_name] = "allow"
+                            save_config(self.cfg)
+                            decision = "allow"
+                        elif answer in ("allow", "once"):
+                            decision = "allow"
+                        else:
+                            decision = "deny"
+                    plan.append((c, tool, decision))
+
+                async def run_one(c: dict, tool: Any, decision: str) -> tuple[dict, str, dict, int]:
                     t0 = time.time()
                     if tool is None:
                         result = {"text": f"unknown tool {c['name']}", "is_error": True, "content": []}
-                        decision = "block"
+                    elif decision == "allow":
+                        try:
+                            result = await self.call_tool(tool, c.get("arguments") or {})
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            result = {"text": f"{type(e).__name__}: {e}", "is_error": True, "content": []}
+                    elif decision == "block":
+                        result = {"text": f"tool {c['name']} is blocked by policy", "is_error": True, "content": []}
                     else:
-                        decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous)
-                        if decision == "ask":
-                            yield {"type": "approval_required", "id": c["id"], "name": c["name"], "arguments": args, "reason": reason}
-                            answer = await self.approvals.ask(req.conversation_id, c["id"], c["name"], args, reason)
-                            if answer == "allow_session":
-                                self.session_allow.setdefault(req.conversation_id, set()).add(tool.full_name)
-                                decision = "allow"
-                            elif answer == "allow_always":
-                                self.cfg.tool_policy.rules[tool.full_name] = "allow"
-                                save_config(self.cfg)
-                                decision = "allow"
-                            elif answer in ("allow", "once"):
-                                decision = "allow"
-                            else:
-                                decision = "deny"
-                        if decision == "allow":
-                            result = await self.call_tool(tool, args)
-                        elif decision == "block":
-                            result = {"text": f"tool {c['name']} is blocked by policy", "is_error": True, "content": []}
-                        else:
-                            result = {"text": f"tool {c['name']} was denied by the user", "is_error": True, "content": []}
-                    dur = int((time.time() - t0) * 1000)
-                    self.store.audit(conversation_id=req.conversation_id, tool=c["name"], arguments=args, decision=decision, is_error=bool(result.get("is_error")), duration_ms=dur, result_excerpt=str(result.get("text", ""))[:2000])
-                    text = str(result.get("text", ""))
-                    if len(text) > 60000:
-                        text = text[:50000] + f"\n... [truncated {len(text) - 50000} chars]"
-                    tool_msg = {"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": text, "is_error": bool(result.get("is_error")), "decision": decision, "duration_ms": dur}
-                    images = [p for p in result.get("content", []) if p.get("type") == "image"]
-                    if images:
-                        tool_msg["images"] = images[:4]
-                    self.store.append_message(req.conversation_id, tool_msg)
-                    pending.pop(c["id"], None)
-                    yield {"type": "tool_result", "id": c["id"], "name": c["name"], "is_error": tool_msg["is_error"], "text": text[:4000], "duration_ms": dur, "decision": decision, "images": tool_msg.get("images", [])}
-                    yield {"type": "message", "message": tool_msg}
-                    messages.append(_strip(tool_msg))
-                    # Gemini/Anthropic can take image tool results as a follow-up user message
-                    if images:
-                        messages.append({"role": "user", "content": [{"type": "text", "text": f"(image returned by {c['name']})"}] + [{"type": "image_url", "image_url": {"url": f"data:{im.get('mime_type', 'image/png')};base64,{im.get('data', '')}"}} for im in images[:2]]})
+                        result = {"text": f"tool {c['name']} was denied by the user", "is_error": True, "content": []}
+                    return c, decision, result, int((time.time() - t0) * 1000)
+
+                sem = asyncio.Semaphore(PARALLEL_TOOLS)
+
+                async def guarded(c: dict, tool: Any, decision: str) -> tuple[dict, str, dict, int]:
+                    async with sem:
+                        return await run_one(c, tool, decision)
+
+                tool_tasks: list[asyncio.Task] = [asyncio.create_task(guarded(*p)) for p in plan] if len(plan) > 1 else []
+                try:
+                    completed: Any = asyncio.as_completed(tool_tasks) if tool_tasks else [await run_one(*plan[0])] if plan else []
+                    for item in completed:
+                        c, decision, result, dur = item if isinstance(item, tuple) else await item
+                        args = c.get("arguments") or {}
+                        self.store.audit(conversation_id=req.conversation_id, tool=c["name"], arguments=args, decision=decision, is_error=bool(result.get("is_error")), duration_ms=dur, result_excerpt=str(result.get("text", ""))[:2000])
+                        text = str(result.get("text", ""))
+                        if len(text) > 60000:
+                            text = text[:50000] + f"\n... [truncated {len(text) - 50000} chars]"
+                        tool_msg = {"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": text, "is_error": bool(result.get("is_error")), "decision": decision, "duration_ms": dur}
+                        images = [p for p in result.get("content", []) if p.get("type") == "image"]
+                        if images:
+                            tool_msg["images"] = images[:4]
+                        self.store.append_message(req.conversation_id, tool_msg)
+                        pending.pop(c["id"], None)
+                        yield {"type": "tool_result", "id": c["id"], "name": c["name"], "is_error": tool_msg["is_error"], "text": text[:4000], "duration_ms": dur, "decision": decision, "images": tool_msg.get("images", [])}
+                        yield {"type": "message", "message": tool_msg}
+                        messages.append(_strip(tool_msg))
+                        # Gemini/Anthropic can take image tool results as a follow-up user message
+                        if images:
+                            messages.append({"role": "user", "content": [{"type": "text", "text": f"(image returned by {c['name']})"}] + [{"type": "image_url", "image_url": {"url": f"data:{im.get('mime_type', 'image/png')};base64,{im.get('data', '')}"}} for im in images[:2]]})
+                except asyncio.CancelledError:
+                    for t in tool_tasks:
+                        t.cancel()
+                    raise
             else:
                 yield {"type": "status", "event": "max_iterations", "data": {"max": max_iter}}
                 finish = "max_iterations"
@@ -494,7 +678,7 @@ def _repair_history(history: list[dict]) -> list[dict]:
 
 def _strip(m: dict) -> dict:
     """Message as sent to providers (drop ids/meta/decision/images that providers do not accept)."""
-    keep = {"role", "content", "tool_calls", "tool_call_id", "name", "is_error"}
+    keep = {"role", "content", "tool_calls", "tool_call_id", "name", "is_error", "thinking_blocks"}
     out = {k: v for k, v in m.items() if k in keep}
     if out.get("role") == "tool" and not isinstance(out.get("content"), str):
         out["content"] = json.dumps(out.get("content"), ensure_ascii=False)

@@ -16,9 +16,13 @@ Known provider quirks handled here:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, AsyncIterator, Optional
 
 from .base import BaseProvider, GenerationOptions, ProviderError, error_text, read_sse
+
+# a 400 that means "this server cannot take tool definitions" (vLLM started without a tool-call parser, and friends)
+_TOOLS_UNSUPPORTED = re.compile(r"tool.?choice|enable-auto-tool-choice|tool-call-parser|does not support tools|tools? (?:is|are) not supported|unsupported.{0,20}tools", re.I)
 
 
 def to_openai_messages(messages: list[dict]) -> list[dict]:
@@ -127,27 +131,21 @@ class OpenAICompatProvider(BaseProvider):
         emitted_calls = False
         got_usage = False
         try:
-            async with self.client.stream("POST", url, headers=self._headers(stream=True), json=body) as resp:
-                if resp.status_code >= 400:
-                    msg = await error_text(resp)
-                    # Some servers reject stream_options; retry once without it.
-                    if "stream_options" in msg:
-                        body.pop("stream_options", None)
-                        async with self.client.stream("POST", url, headers=self._headers(stream=True), json=body) as resp2:
-                            if resp2.status_code >= 400:
-                                yield {"type": "error", "message": await error_text(resp2)}
-                                return
-                            async for ev in self._consume(resp2, pending):
-                                if ev["type"] == "done":
-                                    finish = ev["finish_reason"]
-                                    continue
-                                if ev["type"] == "usage":
-                                    got_usage = True
-                                yield ev
-                    else:
+            for _attempt in range(3):  # at most two fallbacks: drop stream_options, then drop tools
+                async with self.client.stream("POST", url, headers=self._headers(stream=True), json=body) as resp:
+                    if resp.status_code >= 400:
+                        msg = await error_text(resp)
+                        if "stream_options" in msg and "stream_options" in body:
+                            body.pop("stream_options", None)  # some servers reject it
+                            continue
+                        if "tools" in body and _TOOLS_UNSUPPORTED.search(msg):
+                            # vLLM without --enable-auto-tool-choice (and similar servers): answer without tools
+                            body.pop("tools", None)
+                            body.pop("tool_choice", None)
+                            yield {"type": "status", "event": "tools_unsupported", "data": {"message": msg[:300]}}
+                            continue
                         yield {"type": "error", "message": msg}
                         return
-                else:
                     async for ev in self._consume(resp, pending):
                         if ev["type"] == "done":
                             finish = ev["finish_reason"]
@@ -155,6 +153,7 @@ class OpenAICompatProvider(BaseProvider):
                         if ev["type"] == "usage":
                             got_usage = True
                         yield ev
+                    break
         except Exception as e:  # network / decoding
             yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
             return

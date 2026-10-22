@@ -32,8 +32,11 @@ def _user_content(content: Any) -> Any:
     return str(content or "")
 
 
-def to_anthropic_messages(messages: list[dict]) -> list[dict]:
-    """Collapse canonical messages into Anthropic's alternating user/assistant turns."""
+def to_anthropic_messages(messages: list[dict], keep_thinking: bool = False) -> list[dict]:
+    """Collapse canonical messages into Anthropic's alternating user/assistant turns.
+
+    With ``keep_thinking`` the stored thinking blocks (with their signatures) are replayed before the
+    assistant's text and tool_use blocks: the API requires that in a tool-use loop with thinking on."""
     out: list[dict] = []
 
     def push(role: str, blocks: list[dict]) -> None:
@@ -50,6 +53,12 @@ def to_anthropic_messages(messages: list[dict]) -> list[dict]:
             push("user", blocks)
         elif role == "assistant":
             blocks: list[dict] = []
+            if keep_thinking:
+                for tb in m.get("thinking_blocks") or []:
+                    if tb.get("type") == "thinking" and tb.get("signature"):
+                        blocks.append({"type": "thinking", "thinking": tb.get("thinking", ""), "signature": tb["signature"]})
+                    elif tb.get("type") == "redacted_thinking" and tb.get("data"):
+                        blocks.append({"type": "redacted_thinking", "data": tb["data"]})
             text = content_to_text(m.get("content"))
             if text:
                 blocks.append({"type": "text", "text": text})
@@ -108,22 +117,26 @@ class AnthropicProvider(BaseProvider):
     ) -> AsyncIterator[dict]:
         options = options or GenerationOptions()
         system, rest = split_system(messages)
+        extras = {**self.cfg.extra_body, **options.extra_body}
+        keep_thinking = isinstance(extras.get("thinking"), dict) and extras["thinking"].get("type") == "enabled"
         body: dict[str, Any] = {
             "model": model,
-            "messages": to_anthropic_messages(rest),
+            "messages": to_anthropic_messages(rest, keep_thinking=keep_thinking),
             "max_tokens": options.max_tokens or 8192,
             "stream": True,
         }
+        cache = {"type": "ephemeral"}  # prompt caching: the system prompt and the tool list repeat every turn
         if system:
-            body["system"] = system
+            body["system"] = [{"type": "text", "text": system, "cache_control": cache}]
         if tools:
             body["tools"] = [
                 {"name": t["name"], "description": (t.get("description") or "")[:1024], "input_schema": t.get("input_schema") or {"type": "object", "properties": {}}}
                 for t in tools
             ]
+            body["tools"][-1]["cache_control"] = cache
         if options.temperature is not None:
             body["temperature"] = options.temperature
-        for k, v in {**self.cfg.extra_body, **options.extra_body}.items():
+        for k, v in extras.items():
             body[k] = v
 
         blocks: dict[int, dict[str, Any]] = {}
@@ -143,7 +156,7 @@ class AnthropicProvider(BaseProvider):
                     if et == "content_block_start":
                         idx = payload.get("index", 0)
                         cb = payload.get("content_block") or {}
-                        blocks[idx] = {"type": cb.get("type"), "id": cb.get("id"), "name": cb.get("name"), "json": ""}
+                        blocks[idx] = {"type": cb.get("type"), "id": cb.get("id"), "name": cb.get("name"), "json": "", "thinking": "", "signature": "", "data": cb.get("data", "")}
                     elif et == "content_block_delta":
                         idx = payload.get("index", 0)
                         d = payload.get("delta") or {}
@@ -151,7 +164,10 @@ class AnthropicProvider(BaseProvider):
                         if dt == "text_delta":
                             yield {"type": "text_delta", "text": d.get("text", "")}
                         elif dt == "thinking_delta":
+                            blocks.setdefault(idx, {"type": "thinking", "thinking": "", "signature": ""})["thinking"] += d.get("thinking", "")
                             yield {"type": "thinking_delta", "text": d.get("thinking", "")}
+                        elif dt == "signature_delta":
+                            blocks.setdefault(idx, {"type": "thinking", "thinking": "", "signature": ""})["signature"] += d.get("signature", "")
                         elif dt == "input_json_delta":
                             blocks.setdefault(idx, {"type": "tool_use", "json": ""})["json"] += d.get("partial_json", "")
                     elif et == "content_block_stop":
@@ -160,17 +176,22 @@ class AnthropicProvider(BaseProvider):
                         if b and b.get("type") == "tool_use":
                             yield {"type": "tool_call", "id": b.get("id") or f"toolu_{idx}", "name": b.get("name", ""), "arguments": _json_loads_lenient(b.get("json", ""))}
                             emitted_calls = True
+                        elif b and b.get("type") == "thinking":
+                            # kept with the message so the next request in this tool loop can replay it (signature and all)
+                            yield {"type": "thinking_block", "block": {"type": "thinking", "thinking": b.get("thinking", ""), "signature": b.get("signature", "")}}
+                        elif b and b.get("type") == "redacted_thinking":
+                            yield {"type": "thinking_block", "block": {"type": "redacted_thinking", "data": b.get("data", "")}}
                     elif et == "message_start":
                         u = (payload.get("message") or {}).get("usage") or {}
                         if u:
-                            yield {"type": "usage", "input_tokens": u.get("input_tokens", 0), "output_tokens": u.get("output_tokens", 0)}
+                            yield {"type": "usage", "input_tokens": u.get("input_tokens", 0), "output_tokens": u.get("output_tokens", 0), "cache_read_input_tokens": u.get("cache_read_input_tokens", 0) or 0, "cache_creation_input_tokens": u.get("cache_creation_input_tokens", 0) or 0}
                     elif et == "message_delta":
                         sr = (payload.get("delta") or {}).get("stop_reason")
                         if sr:
                             stop_reason = sr
                         u = payload.get("usage") or {}
                         if u:
-                            yield {"type": "usage", "input_tokens": u.get("input_tokens", 0) or 0, "output_tokens": u.get("output_tokens", 0) or 0}
+                            yield {"type": "usage", "input_tokens": u.get("input_tokens", 0) or 0, "output_tokens": u.get("output_tokens", 0) or 0, "cache_read_input_tokens": u.get("cache_read_input_tokens", 0) or 0, "cache_creation_input_tokens": u.get("cache_creation_input_tokens", 0) or 0}
                     elif et == "error":
                         err = payload.get("error") or {}
                         yield {"type": "error", "message": err.get("message", "anthropic stream error")}

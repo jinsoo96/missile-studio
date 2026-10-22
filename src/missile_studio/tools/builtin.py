@@ -15,6 +15,7 @@ import platform
 import re
 import shutil
 import sys
+import urllib.parse as _urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -96,8 +97,10 @@ class LocalTools:
             self._add("write_file", "Create or overwrite a UTF-8 text file inside the workspace (parent folders are created).", {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "append": {"type": "boolean", "default": False}}, "required": ["path", "content"]}, self.write_file, destructive=True)
             self._add("list_dir", "List entries of a folder inside the workspace.", {"type": "object", "properties": {"path": {"type": "string", "default": "."}, "recursive": {"type": "boolean", "default": False}, "max_entries": {"type": "integer", "default": 500}}}, self.list_dir, read_only=True)
             self._add("search_files", "Search text (regex) in files under the workspace. Returns path:line:text matches.", {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string", "default": "."}, "glob": {"type": "string", "default": "*"}, "max_results": {"type": "integer", "default": 200}}, "required": ["pattern"]}, self.search_files, read_only=True)
+        self.web_search_cfg: Any = None  # a WebSearchConfig, set by the engine (provider, key, url)
         if enable_web:
             self._add("fetch_url", "HTTP GET a URL and return the body as text (HTML tags stripped), truncated.", {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer", "default": 20000}}, "required": ["url"]}, self.fetch_url, read_only=True)
+            self._add("web_search", "Search the web. Returns numbered results with title, URL and snippet; follow up with fetch_url to read a page.", {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer", "default": 8}}, "required": ["query"]}, self.web_search, read_only=True)
         self._add("now", "Current date/time with timezone, plus OS and workspace path.", {"type": "object", "properties": {}}, self.now, read_only=True)
 
     def _add(self, name: str, desc: str, schema: dict, fn: Callable, read_only: bool = False, destructive: bool = False) -> None:
@@ -237,9 +240,63 @@ class LocalTools:
             body = body[:max_chars] + f"\n... [truncated, {len(body)} chars total]"
         return f"HTTP {r.status_code} {ctype}\n{body}"
 
+    async def web_search(self, query: str, max_results: int = 8) -> str:
+        """One search API, chosen in settings: duckduckgo (no key) | tavily | brave | serper | searxng."""
+        cfg = self.web_search_cfg
+        provider = (getattr(cfg, "provider", "") or "duckduckgo").lower()
+        key = cfg.resolved_api_key() if cfg else ""
+        n = max(1, min(int(max_results or 8), 20))
+        results: list[dict] = []
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers={"User-Agent": "Mozilla/5.0 (missile-studio)"}) as c:
+            if provider == "tavily":
+                if not key:
+                    raise ValueError("web_search: tavily needs an API key (Settings → Tools)")
+                r = await c.post("https://api.tavily.com/search", json={"api_key": key, "query": query, "max_results": n, "include_answer": False})
+                r.raise_for_status()
+                results = [{"title": x.get("title", ""), "url": x.get("url", ""), "snippet": x.get("content", "")} for x in r.json().get("results", [])]
+            elif provider == "brave":
+                if not key:
+                    raise ValueError("web_search: brave needs an API key (Settings → Tools)")
+                r = await c.get("https://api.search.brave.com/res/v1/web/search", params={"q": query, "count": n}, headers={"X-Subscription-Token": key, "Accept": "application/json"})
+                r.raise_for_status()
+                results = [{"title": x.get("title", ""), "url": x.get("url", ""), "snippet": x.get("description", "")} for x in (r.json().get("web") or {}).get("results", [])]
+            elif provider == "serper":
+                if not key:
+                    raise ValueError("web_search: serper needs an API key (Settings → Tools)")
+                r = await c.post("https://google.serper.dev/search", json={"q": query, "num": n}, headers={"X-API-KEY": key})
+                r.raise_for_status()
+                results = [{"title": x.get("title", ""), "url": x.get("link", ""), "snippet": x.get("snippet", "")} for x in r.json().get("organic", [])]
+            elif provider == "searxng":
+                base = (getattr(cfg, "url", "") or "").rstrip("/")
+                if not base:
+                    raise ValueError("web_search: searxng needs its base URL (Settings → Tools)")
+                r = await c.get(f"{base}/search", params={"q": query, "format": "json"})
+                r.raise_for_status()
+                results = [{"title": x.get("title", ""), "url": x.get("url", ""), "snippet": x.get("content", "")} for x in r.json().get("results", [])]
+            else:  # duckduckgo: the HTML endpoint, no key, parsed with regexes
+                r = await c.get("https://html.duckduckgo.com/html/", params={"q": query})
+                r.raise_for_status()
+                html = r.text
+                for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>(?:.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>)?', html, flags=re.S):
+                    href, title, snip = m.group(1), m.group(2), m.group(3) or ""
+                    um = re.search(r"[?&]uddg=([^&]+)", href)
+                    url = _urlparse.unquote(um.group(1)) if um else href
+                    results.append({"title": _strip_tags(title), "url": url, "snippet": _strip_tags(snip)})
+        results = [x for x in results if x.get("url")][:n]
+        if not results:
+            return f"no results for: {query}"
+        lines = [f"{i + 1}. {x['title']}\n   {x['url']}\n   {x['snippet'][:300]}" for i, x in enumerate(results)]
+        return f"web search ({provider}) for: {query}\n\n" + "\n".join(lines)
+
     def now(self) -> str:
         n = _dt.datetime.now().astimezone()
         return f"{n.isoformat()} ({n.tzname()}) | {platform.system()} {platform.release()} | python {sys.version.split()[0]} | workspace {self.workspace}"
+
+
+def _strip_tags(s: str) -> str:
+    s = re.sub(r"<[^>]+>", "", s or "")
+    s = s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#x27;", "'").replace("&#39;", "'")
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _inside(p: Path, root: Path) -> bool:

@@ -42,6 +42,17 @@ STATIC = Path(__file__).parent / "static"
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
+def _builtin_view(cfg) -> dict:
+    """builtin_tools for the browser: the web-search key is masked, the workspace path resolved."""
+    d = cfg.builtin_tools.model_dump()
+    ws = d.get("web_search") or {}
+    ws["has_key"] = bool(cfg.builtin_tools.web_search.resolved_api_key())
+    ws["api_key"] = "…" if ws.get("api_key") else ""
+    d["web_search"] = ws
+    d["workspace_resolved"] = str(cfg.builtin_tools.workspace_path())
+    return d
+
+
 def _mask(pc: ProviderConfig) -> dict:
     d = pc.model_dump()
     if d.get("api_key"):
@@ -58,6 +69,50 @@ def _mask(pc: ProviderConfig) -> dict:
 
 class LoginIn(BaseModel):
     token: str
+
+
+STREAM_RETENTION = 600.0  # seconds a finished turn stays replayable for a tab that comes back
+STREAM_MAX_EVENTS = 60000
+
+
+class TurnStream:
+    """Server-side event buffer of one turn. Any number of SSE followers can replay it from an index and then wait for more."""
+
+    def __init__(self, conversation_id: str):
+        self.conversation_id = conversation_id
+        self.events: list[dict] = []
+        self.done = False
+        self.started_at = time.time()
+        self._cond = asyncio.Condition()
+
+    async def push(self, ev: dict) -> None:
+        async with self._cond:
+            if len(self.events) < STREAM_MAX_EVENTS:
+                self.events.append(ev)
+            self._cond.notify_all()
+
+    async def finish(self) -> None:
+        async with self._cond:
+            self.done = True
+            self._cond.notify_all()
+
+    async def follow(self, after: int = 0):
+        yield f"event: open\ndata: {json.dumps({'type': 'open', 'conversation_id': self.conversation_id, 'after': after, 'buffered': len(self.events)})}\n\n"
+        i = max(0, int(after or 0))
+        while True:
+            while i < len(self.events):
+                ev = self.events[i]
+                i += 1
+                yield f"data: {json.dumps({**ev, 'i': i}, ensure_ascii=False)}\n\n"
+            if self.done:
+                break
+            async with self._cond:
+                if i < len(self.events) or self.done:
+                    continue
+                try:
+                    await asyncio.wait_for(self._cond.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
 
 
 class DefaultIn(BaseModel):
@@ -96,6 +151,8 @@ class ChatIn(BaseModel):
     thinking: str = ""  # "" | off | on | max
     style_id: str = ""
     branch_from: str = ""  # id of the user message being edited: the new message becomes its sibling
+    mode: str = ""  # "" | research
+    knowledge: bool = False  # put knowledge-base excerpts for this message into context
 
 
 class HeadIn(BaseModel):
@@ -118,6 +175,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     app.state.token = token
     app.state.bridges = {}
     app.state.turn_tasks = {}
+    app.state.turn_streams = {}
     store = engine.store
 
     # ------------------------------------------------------------ auth
@@ -227,7 +285,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "mcp": engine.mcp.status(),
             "tools": [t.as_dict() for t in engine.all_tools()],
             "policy": cfg.tool_policy.model_dump(),
-            "builtin_tools": {**cfg.builtin_tools.model_dump(), "workspace_resolved": str(cfg.builtin_tools.workspace_path())},
+            "builtin_tools": _builtin_view(cfg),
+            "memory": cfg.memory.model_dump(),
+            "knowledge": {**cfg.knowledge.model_dump(), **(engine.knowledge.status() if engine.knowledge else {})},
             "server": {"host": cfg.server.host, "port": cfg.server.port, "auth_required": bool(app.state.token)},
             "approvals": [a.as_dict() for a in engine.approvals.pending.values()],
             "bridges": [b.as_dict() for b in app.state.bridges.values()],
@@ -432,9 +492,111 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     @app.put("/api/builtin-tools", dependencies=[admin_dep])
     async def put_builtin(body: dict):
+        ws = body.get("web_search") or {}
+        if ws.get("api_key") in ("…", "***"):  # the masked value from /api/state: keep the stored key
+            ws["api_key"] = engine.cfg.builtin_tools.web_search.api_key
         engine.cfg.builtin_tools = BuiltinTools.model_validate(body)
         await engine.apply_config(engine.cfg)
-        return engine.cfg.builtin_tools.model_dump()
+        engine.save()
+        return _builtin_view(engine.cfg)
+
+    # ------------------------------------------------------------ search, memory, knowledge
+    @app.get("/api/search", dependencies=[user_dep])
+    async def search(q: str = "", limit: int = 30):
+        return {"q": q, "hits": store.search_messages(q, max(1, min(limit, 100)))}
+
+    class MemoryIn(BaseModel):
+        text: str
+        tags: str = ""
+
+    class MemorySettingsIn(BaseModel):
+        enabled: bool = True
+        recall_k: int = 5
+
+    @app.get("/api/memory", dependencies=[user_dep])
+    async def memory_list(q: str = ""):
+        return {"enabled": engine.cfg.memory.enabled, "recall_k": engine.cfg.memory.recall_k, "items": store.search_memories(q, 50) if q else store.list_memories()}
+
+    @app.post("/api/memory", dependencies=[user_dep])
+    async def memory_add(body: MemoryIn, request: Request):
+        if not body.text.strip():
+            raise HTTPException(400, "empty")
+        m = store.add_memory(body.text, source=principal_of(request)["actor"], tags=body.tags)
+        store.event("info", "data", "memory added", {"id": m["id"]}, actor=principal_of(request)["actor"])
+        return m
+
+    @app.put("/api/memory/{mid}", dependencies=[user_dep])
+    async def memory_update(mid: str, body: MemoryIn):
+        if not store.update_memory(mid, body.text):
+            raise HTTPException(404, "no such memory")
+        return store.get_memory(mid)
+
+    @app.delete("/api/memory/{mid}", dependencies=[user_dep])
+    async def memory_delete(mid: str):
+        return {"ok": store.delete_memory(mid)}
+
+    @app.put("/api/memory-settings", dependencies=[admin_dep])  # not under /api/memory/{mid}
+    async def memory_settings(body: MemorySettingsIn):
+        engine.cfg.memory.enabled = body.enabled
+        engine.cfg.memory.recall_k = max(0, min(body.recall_k, 20))
+        await engine.apply_config(engine.cfg)
+        engine.save()
+        return engine.cfg.memory.model_dump()
+
+    class KbSourceIn(BaseModel):
+        path: str
+
+    class KbSettingsIn(BaseModel):
+        embeddings_provider: str = ""
+        embeddings_model: str = ""
+        chunk_chars: int = 900
+        top_k: int = 6
+
+    @app.get("/api/knowledge", dependencies=[user_dep])
+    async def knowledge_status():
+        return engine.knowledge.status() if engine.knowledge else {"error": "knowledge base unavailable"}
+
+    @app.post("/api/knowledge/sources", dependencies=[admin_dep])
+    async def knowledge_add(body: KbSourceIn, request: Request):
+        p = Path(body.path).expanduser()
+        if not p.exists():
+            raise HTTPException(404, f"not found: {p}")
+        src = store.kb_add_source(str(p.resolve()))
+        if str(p.resolve()) not in engine.cfg.knowledge.sources:
+            engine.cfg.knowledge.sources.append(str(p.resolve()))
+            engine.save()
+        store.event("info", "data", "knowledge source added", {"path": str(p)}, actor=principal_of(request)["actor"])
+        asyncio.create_task(engine.knowledge.reindex(src["id"]))
+        return src
+
+    @app.delete("/api/knowledge/sources/{sid}", dependencies=[admin_dep])
+    async def knowledge_delete(sid: str):
+        src = next((s for s in store.kb_list_sources() if s["id"] == sid), None)
+        if not src:
+            raise HTTPException(404, "no such source")
+        store.kb_delete_source(sid)
+        engine.cfg.knowledge.sources = [s for s in engine.cfg.knowledge.sources if s != src["path"]]
+        engine.save()
+        return {"ok": True}
+
+    @app.post("/api/knowledge/reindex", dependencies=[admin_dep])
+    async def knowledge_reindex(wait: bool = False):
+        if wait:
+            return await engine.knowledge.reindex()
+        asyncio.create_task(engine.knowledge.reindex())
+        return {"ok": True, "started": True}
+
+    @app.get("/api/knowledge/search", dependencies=[user_dep])
+    async def knowledge_search(q: str = "", k: int = 6):
+        return {"q": q, "hits": await engine.knowledge.search(q, max(1, min(k, 20)))}
+
+    @app.put("/api/knowledge/settings", dependencies=[admin_dep])
+    async def knowledge_settings(body: KbSettingsIn):
+        kc = engine.cfg.knowledge
+        kc.embeddings_provider, kc.embeddings_model = body.embeddings_provider, body.embeddings_model
+        kc.chunk_chars, kc.top_k = max(200, min(body.chunk_chars, 4000)), max(1, min(body.top_k, 20))
+        engine.save()
+        return kc.model_dump()
 
     # ------------------------------------------------------------ conversations
     @app.get("/api/conversations", dependencies=[user_dep])
@@ -503,43 +665,40 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             allow_dangerous=body.allow_dangerous and p["role"] == "admin",
             thinking=body.thinking,
             style_id=body.style_id,
+            mode=body.mode,
+            knowledge=body.knowledge,
         )
-        queue: asyncio.Queue = asyncio.Queue()
+        # The turn runs on the server in its own task and writes to a buffer; the browser only *follows* that
+        # buffer. Closing the tab therefore does not stop the turn, and a new tab can reattach and replay.
+        ts = TurnStream(body.conversation_id)
+        app.state.turn_streams[body.conversation_id] = ts
 
         async def producer():
             try:
                 async for ev in engine.run_turn(req):
-                    await queue.put(ev)
+                    await ts.push(ev)
             except asyncio.CancelledError:
-                await queue.put({"type": "done", "finish_reason": "cancelled"})
+                await ts.push({"type": "done", "finish_reason": "cancelled"})
             except Exception as e:  # pragma: no cover
                 log.exception("turn failed")
-                await queue.put({"type": "error", "message": f"{type(e).__name__}: {e}"})
-                await queue.put({"type": "done", "finish_reason": "error"})
+                await ts.push({"type": "error", "message": f"{type(e).__name__}: {e}"})
+                await ts.push({"type": "done", "finish_reason": "error"})
             finally:
-                await queue.put(None)
+                await ts.finish()
+                app.state.turn_tasks.pop(body.conversation_id, None)
+                asyncio.get_running_loop().call_later(STREAM_RETENTION, lambda: app.state.turn_streams.pop(body.conversation_id, None) if app.state.turn_streams.get(body.conversation_id) is ts else None)
 
         task = asyncio.create_task(producer())
         app.state.turn_tasks[body.conversation_id] = task
+        return StreamingResponse(ts.follow(0), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
-        async def gen():
-            try:
-                yield f"event: open\ndata: {json.dumps({'type': 'open', 'conversation_id': body.conversation_id})}\n\n"
-                while True:
-                    try:
-                        ev = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield ": keepalive\n\n"
-                        continue
-                    if ev is None:
-                        break
-                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            finally:
-                if not task.done():
-                    task.cancel()
-                app.state.turn_tasks.pop(body.conversation_id, None)
-
-        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+    @app.get("/api/chat/{cid}/stream", dependencies=[user_dep])
+    async def chat_stream(cid: str, after: int = 0):
+        """Reattach to a running (or just finished) turn: replays buffered events from ``after``, then follows live."""
+        ts = app.state.turn_streams.get(cid)
+        if ts is None:
+            raise HTTPException(404, "no turn stream for this conversation")
+        return StreamingResponse(ts.follow(after), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @app.post("/api/chat/{cid}/stop", dependencies=[user_dep])
     async def stop_chat(cid: str):

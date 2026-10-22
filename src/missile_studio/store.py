@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -86,6 +87,21 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
+def _message_text(message: dict) -> str:
+    """The searchable text of a stored message: plain content or the text parts of a multimodal one."""
+    c = message.get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        return "\n".join(str(p.get("text", "")) for p in c if isinstance(p, dict) and p.get("type") == "text").strip()
+    return ""
+
+
+def _fts_phrase(q: str) -> str:
+    """Quote a user string as one FTS5 phrase (trigram: substring match, no operator surprises)."""
+    return '"' + q.replace('"', '""') + '"'
+
+
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -109,10 +125,45 @@ class Store:
         return conn
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        """Add columns introduced after 0.1 (branching, styles, account roles). Idempotent."""
+        """Add columns and side tables introduced after 0.1 (branching, styles, account roles, compaction, search,
+        memories, knowledge base). Idempotent."""
         acols = {r[1] for r in conn.execute("PRAGMA table_info(admin_users)").fetchall()}
         if acols and "role" not in acols:
             conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")  # admin | user (sign-ups)
+        ccols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "summary" not in ccols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''")  # compacted earlier history
+        if "summary_upto" not in ccols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN summary_upto TEXT")  # id of the last message the summary covers
+        # full-text search over message bodies, memories and knowledge chunks. trigram = substring matches, Korean included.
+        self.fts = True
+        try:
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, message_id UNINDEXED, conversation_id UNINDEXED, role UNINDEXED, tokenize='trigram')")
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(text, memory_id UNINDEXED, tokenize='trigram')")
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(text, chunk_id UNINDEXED, tokenize='trigram')")
+        except sqlite3.OperationalError:
+            self.fts = False
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+              id TEXT PRIMARY KEY, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS kb_sources (
+              id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, added_at REAL NOT NULL, indexed_at REAL, files INTEGER NOT NULL DEFAULT 0, chunks INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS kb_chunks (
+              id TEXT PRIMARY KEY, source_id TEXT NOT NULL, path TEXT NOT NULL, idx INTEGER NOT NULL, text TEXT NOT NULL, mtime REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS kb_chunks_path ON kb_chunks(source_id, path);
+            CREATE TABLE IF NOT EXISTS kb_vectors (chunk_id TEXT PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL);
+            """
+        )
+        if self.fts and conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] == 0:
+            for r in conn.execute("SELECT id, conversation_id, role, content FROM messages WHERE role IN ('user','assistant')").fetchall():
+                text = _message_text(json.loads(r[3]))
+                if text:
+                    conn.execute("INSERT INTO messages_fts(text, message_id, conversation_id, role) VALUES (?,?,?,?)", (text, r[0], r[1], r[2]))
         cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "parent_id" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
@@ -173,6 +224,8 @@ class Store:
     def delete_conversation(self, cid: str) -> None:
         self._conn().execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
         self._conn().execute("DELETE FROM conversations WHERE id=?", (cid,))
+        if getattr(self, "fts", False):
+            self._conn().execute("DELETE FROM messages_fts WHERE conversation_id=?", (cid,))
 
     # ---- messages
     def append_message(self, cid: str, message: dict, parent_id: Any = "__head__") -> str:
@@ -189,6 +242,7 @@ class Store:
             (mid, cid, seq, message.get("role", "user"), json.dumps(body, ensure_ascii=False), time.time(), parent_id),
         )
         conn.execute("UPDATE conversations SET updated_at=?, head_id=? WHERE id=?", (time.time(), mid, cid))
+        self.index_message(mid, cid, message.get("role", "user"), body)
         return mid
 
     def _rows(self, cid: str) -> dict[str, sqlite3.Row]:
@@ -256,6 +310,180 @@ class Store:
         row = conn.execute("SELECT seq FROM messages WHERE id=? AND conversation_id=?", (message_id, cid)).fetchone()
         if row:
             conn.execute("DELETE FROM messages WHERE conversation_id=? AND seq>=?", (cid, row["seq"]))
+
+    # ---- full-text search over chats
+    def index_message(self, mid: str, cid: str, role: str, message: dict) -> None:
+        if not getattr(self, "fts", False) or role not in ("user", "assistant"):
+            return
+        text = _message_text(message)
+        if text:
+            self._conn().execute("INSERT INTO messages_fts(text, message_id, conversation_id, role) VALUES (?,?,?,?)", (text, mid, cid, role))
+
+    def search_messages(self, q: str, limit: int = 30) -> list[dict]:
+        """Chats whose messages contain ``q`` (substring, any language), newest first, with a snippet per hit."""
+        q = (q or "").strip()
+        if not q:
+            return []
+        conn = self._conn()
+        rows: list = []
+        if getattr(self, "fts", False) and len(q) >= 3:
+            rows = conn.execute(
+                "SELECT f.message_id, f.conversation_id, f.role, snippet(messages_fts, 0, '[', ']', '…', 18) AS snip, m.created_at, c.title "
+                "FROM messages_fts f JOIN messages m ON m.id=f.message_id JOIN conversations c ON c.id=f.conversation_id "
+                "WHERE messages_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?",
+                (_fts_phrase(q), limit),
+            ).fetchall()
+        if not rows:  # short queries (trigram needs 3 chars), or no FTS: substring scan over the message text itself
+            like = f"%{q}%"
+            rows = conn.execute(
+                "WITH t AS (SELECT m.id, m.conversation_id, m.role, m.created_at, c.title, "
+                "CASE WHEN json_type(m.content, '$.content') = 'text' THEN json_extract(m.content, '$.content') ELSE m.content END AS body "
+                "FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.role IN ('user','assistant')) "
+                "SELECT id, conversation_id, role, replace(substr(body, max(1, instr(body, ?) - 40), 120), ?, '[' || ? || ']'), created_at, title "
+                "FROM t WHERE body LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (q, q, q, like, limit),
+            ).fetchall()
+        return [{"message_id": r[0], "conversation_id": r[1], "role": r[2], "snippet": r[3], "created_at": r[4], "title": r[5]} for r in rows]
+
+    # ---- memories (facts about the user that outlive one chat)
+    def add_memory(self, text: str, source: str = "", tags: str = "") -> dict:
+        mid = uuid.uuid4().hex[:12]
+        now = time.time()
+        conn = self._conn()
+        conn.execute("INSERT INTO memories(id,text,source,tags,created_at,updated_at) VALUES (?,?,?,?,?,?)", (mid, text.strip(), source, tags, now, now))
+        if getattr(self, "fts", False):
+            conn.execute("INSERT INTO memories_fts(text, memory_id) VALUES (?,?)", (text.strip(), mid))
+        return self.get_memory(mid)  # type: ignore[return-value]
+
+    def get_memory(self, mid: str) -> Optional[dict]:
+        row = self._conn().execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
+        return dict(row) if row else None
+
+    def list_memories(self, limit: int = 500) -> list[dict]:
+        return [dict(r) for r in self._conn().execute("SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()]
+
+    def update_memory(self, mid: str, text: str) -> bool:
+        conn = self._conn()
+        cur = conn.execute("UPDATE memories SET text=?, updated_at=? WHERE id=?", (text.strip(), time.time(), mid))
+        if cur.rowcount and getattr(self, "fts", False):
+            conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (mid,))
+            conn.execute("INSERT INTO memories_fts(text, memory_id) VALUES (?,?)", (text.strip(), mid))
+        return cur.rowcount > 0
+
+    def delete_memory(self, mid: str) -> bool:
+        conn = self._conn()
+        cur = conn.execute("DELETE FROM memories WHERE id=?", (mid,))
+        if getattr(self, "fts", False):
+            conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (mid,))
+        return cur.rowcount > 0
+
+    def search_memories(self, q: str, limit: int = 5) -> list[dict]:
+        """Memories matching any 3+ character word of ``q`` (OR), best first; falls back to the newest ones."""
+        words = [w for w in re.findall(r"[\w가-힣]{3,}", q or "") if not w.isdigit()][:12]
+        conn = self._conn()
+        if words and getattr(self, "fts", False):
+            match = " OR ".join(_fts_phrase(w) for w in words)
+            try:
+                rows = conn.execute("SELECT m.* FROM memories_fts f JOIN memories m ON m.id=f.memory_id WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?", (match, limit)).fetchall()
+                if rows:
+                    return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                pass
+        return []
+
+    # ---- knowledge base (indexed folders/files)
+    def kb_add_source(self, path: str) -> dict:
+        sid = uuid.uuid4().hex[:10]
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM kb_sources WHERE path=?", (path,)).fetchone()
+        if row:
+            return dict(row)
+        conn.execute("INSERT INTO kb_sources(id,path,added_at) VALUES (?,?,?)", (sid, path, time.time()))
+        return dict(conn.execute("SELECT * FROM kb_sources WHERE id=?", (sid,)).fetchone())
+
+    def kb_list_sources(self) -> list[dict]:
+        return [dict(r) for r in self._conn().execute("SELECT * FROM kb_sources ORDER BY added_at").fetchall()]
+
+    def kb_update_source(self, sid: str, **fields: Any) -> None:
+        if fields:
+            cols = ", ".join(f"{k}=?" for k in fields)
+            self._conn().execute(f"UPDATE kb_sources SET {cols} WHERE id=?", (*fields.values(), sid))
+
+    def kb_delete_source(self, sid: str) -> bool:
+        conn = self._conn()
+        ids = [r[0] for r in conn.execute("SELECT id FROM kb_chunks WHERE source_id=?", (sid,)).fetchall()]
+        self._kb_drop_chunks(ids)
+        return conn.execute("DELETE FROM kb_sources WHERE id=?", (sid,)).rowcount > 0
+
+    def kb_file_mtimes(self, sid: str) -> dict[str, float]:
+        return {r[0]: r[1] for r in self._conn().execute("SELECT path, MAX(mtime) FROM kb_chunks WHERE source_id=? GROUP BY path", (sid,)).fetchall()}
+
+    def _kb_drop_chunks(self, ids: list[str]) -> None:
+        conn = self._conn()
+        for i in range(0, len(ids), 500):
+            batch = ids[i : i + 500]
+            marks = ",".join("?" * len(batch))
+            conn.execute(f"DELETE FROM kb_chunks WHERE id IN ({marks})", batch)
+            conn.execute(f"DELETE FROM kb_vectors WHERE chunk_id IN ({marks})", batch)
+            if getattr(self, "fts", False):
+                conn.execute(f"DELETE FROM kb_fts WHERE chunk_id IN ({marks})", batch)
+
+    def kb_replace_file(self, sid: str, path: str, chunks: list[str], mtime: float) -> list[str]:
+        """Re-index one file: drop its old chunks, insert the new ones. Returns the new chunk ids."""
+        conn = self._conn()
+        old = [r[0] for r in conn.execute("SELECT id FROM kb_chunks WHERE source_id=? AND path=?", (sid, path)).fetchall()]
+        self._kb_drop_chunks(old)
+        ids = []
+        for i, text in enumerate(chunks):
+            cid = uuid.uuid4().hex[:14]
+            conn.execute("INSERT INTO kb_chunks(id,source_id,path,idx,text,mtime) VALUES (?,?,?,?,?,?)", (cid, sid, path, i, text, mtime))
+            if getattr(self, "fts", False):
+                conn.execute("INSERT INTO kb_fts(text, chunk_id) VALUES (?,?)", (text, cid))
+            ids.append(cid)
+        return ids
+
+    def kb_drop_file(self, sid: str, path: str) -> None:
+        ids = [r[0] for r in self._conn().execute("SELECT id FROM kb_chunks WHERE source_id=? AND path=?", (sid, path)).fetchall()]
+        self._kb_drop_chunks(ids)
+
+    def kb_search_text(self, q: str, limit: int = 12) -> list[dict]:
+        q = (q or "").strip()
+        conn = self._conn()
+        words = [w for w in re.findall(r"[\w가-힣]{3,}", q)][:12]
+        rows: list = []
+        if words and getattr(self, "fts", False):
+            match = " OR ".join(_fts_phrase(w) for w in words)
+            try:
+                rows = conn.execute("SELECT c.id, c.path, c.idx, c.text, rank FROM kb_fts f JOIN kb_chunks c ON c.id=f.chunk_id WHERE kb_fts MATCH ? ORDER BY rank LIMIT ?", (match, limit)).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+        if not rows and q:
+            rows = conn.execute("SELECT id, path, idx, text, 0 FROM kb_chunks WHERE text LIKE ? LIMIT ?", (f"%{q}%", limit)).fetchall()
+        return [{"chunk_id": r[0], "path": r[1], "idx": r[2], "text": r[3], "score": float(r[4] or 0)} for r in rows]
+
+    def kb_get_chunks(self, ids: list[str]) -> dict[str, dict]:
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        return {r["id"]: dict(r) for r in self._conn().execute(f"SELECT * FROM kb_chunks WHERE id IN ({marks})", ids).fetchall()}
+
+    def kb_chunks_without_vectors(self, model: str, limit: int = 256) -> list[dict]:
+        return [dict(r) for r in self._conn().execute("SELECT c.id, c.text FROM kb_chunks c LEFT JOIN kb_vectors v ON v.chunk_id=c.id AND v.model=? WHERE v.chunk_id IS NULL LIMIT ?", (model, limit)).fetchall()]
+
+    def kb_set_vector(self, chunk_id: str, model: str, vec: bytes, dim: int) -> None:
+        self._conn().execute("INSERT OR REPLACE INTO kb_vectors(chunk_id, model, dim, vec) VALUES (?,?,?,?)", (chunk_id, model, dim, vec))
+
+    def kb_vectors(self, model: str) -> list[tuple[str, int, bytes]]:
+        return [(r[0], r[1], r[2]) for r in self._conn().execute("SELECT chunk_id, dim, vec FROM kb_vectors WHERE model=?", (model,)).fetchall()]
+
+    def kb_stats(self) -> dict:
+        conn = self._conn()
+        return {
+            "sources": conn.execute("SELECT COUNT(*) FROM kb_sources").fetchone()[0],
+            "chunks": conn.execute("SELECT COUNT(*) FROM kb_chunks").fetchone()[0],
+            "vectors": conn.execute("SELECT COUNT(*) FROM kb_vectors").fetchone()[0],
+            "fts": bool(getattr(self, "fts", False)),
+        }
 
     # ---- audit
     def audit(self, *, conversation_id: str, tool: str, arguments: dict, decision: str, is_error: bool, duration_ms: int, result_excerpt: str) -> None:

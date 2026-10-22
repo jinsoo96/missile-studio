@@ -75,6 +75,12 @@ class ProviderConfig(BaseModel):
     email: str = ""
     password: str = ""
     allow_insecure_tls: bool = False
+    context_window: int = 0  # tokens the model accepts; 0 = a sensible guess per kind (used for compaction)
+
+    def context_tokens(self) -> int:
+        if self.context_window:
+            return self.context_window
+        return {"anthropic": 200_000, "gemini": 1_000_000}.get(self.kind, 128_000)
 
     def resolved_api_key(self) -> str:
         if self.api_key:
@@ -121,11 +127,40 @@ class AssistantConfig(BaseModel):
     max_iterations: int = 25
 
 
+class WebSearchConfig(BaseModel):
+    """The web_search tool. duckduckgo needs no key; tavily / brave / serper need one; searxng needs a URL."""
+
+    provider: str = "duckduckgo"  # duckduckgo | tavily | brave | serper | searxng
+    api_key: str = ""
+    api_key_env: str = ""
+    url: str = ""  # searxng base URL
+
+    def resolved_api_key(self) -> str:
+        return self.api_key or (os.environ.get(self.api_key_env, "") if self.api_key_env else "")
+
+
+class KnowledgeConfig(BaseModel):
+    """Knowledge base: folders/files indexed into FTS, plus optional embeddings through an OpenAI-compatible provider."""
+
+    sources: list[str] = Field(default_factory=list)  # absolute folders or files
+    embeddings_provider: str = ""  # a provider id (openai-compatible /embeddings); empty = keyword search only
+    embeddings_model: str = ""
+    chunk_chars: int = 900
+    top_k: int = 6
+    extensions: list[str] = Field(default_factory=lambda: [".md", ".txt", ".markdown", ".rst", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".pdf"])
+
+
+class MemoryConfig(BaseModel):
+    enabled: bool = True
+    recall_k: int = 5
+
+
 class BuiltinTools(BaseModel):
     shell: bool = True
     filesystem: bool = True
     web: bool = True
     workspace: str = ""
+    web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
     def workspace_path(self) -> Path:
         if self.workspace:
@@ -179,6 +214,8 @@ class Config(BaseModel):
     tool_policy: ToolPolicy = Field(default_factory=ToolPolicy)
     assistants: list[AssistantConfig] = Field(default_factory=list)
     builtin_tools: BuiltinTools = Field(default_factory=BuiltinTools)
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     presets: list[ModelPreset] = Field(default_factory=list)
     styles: list[StyleConfig] = Field(default_factory=list)
 

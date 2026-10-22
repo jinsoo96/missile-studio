@@ -19,6 +19,8 @@
   const hue = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
   const avatarStyle = (s) => `background: hsl(${hue(s)} 55% 48%)`;
   const shortModel = (m) => (m || '').includes('|') ? m.split('|')[1] : m || '';
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const hl = (snippet) => esc(snippet).replace(/\[([^\]]{1,80})\]/g, '<mark>$1</mark>');  // the search API marks hits with [ ]
   const MAX_PANES = 3;
   const THINK_LABEL = { '': 'provider default', on: 'thinking on', max: 'thinking max', off: 'thinking off' };
   const EXT = { html: 'html', svg: 'svg', markdown: 'md', md: 'md', json: 'json', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', python: 'py', py: 'py', bash: 'sh', sh: 'sh', powershell: 'ps1', css: 'css', yaml: 'yml', yml: 'yml', sql: 'sql', go: 'go', rust: 'rs', java: 'java', csharp: 'cs', cpp: 'cpp', c: 'c', xml: 'xml', toml: 'toml', mermaid: 'mmd' };
@@ -205,10 +207,23 @@
     pane.append(el('div', { class: 'pane-search' }, I('search', 'sm'), search));
     const list = el('div', { class: 'pane-list' }); pane.append(list);
     const openIds = new Set(S.panes.map((p) => p.convId).filter(Boolean));
+    let searchTimer = null;
     function renderList() {
       list.innerHTML = ''; let last = '';
       const q = S.search.toLowerCase();
       const items = S.convs.filter((c) => !q || (c.title || '').toLowerCase().includes(q));
+      // titles match instantly; message bodies are searched on the server after a short pause
+      clearTimeout(searchTimer);
+      if (q.length >= 2) searchTimer = setTimeout(async () => {
+        let r; try { r = await api('/api/search?q=' + encodeURIComponent(S.search.trim()) + '&limit=40'); } catch { return; }
+        if (S.search.toLowerCase() !== q || !list.isConnected) return;
+        const seen = new Set(); const box = el('div', { class: 'srch' }, el('div', { class: 'pane-group' }, 'In messages'));
+        for (const h of r.hits) {
+          if (seen.has(h.conversation_id)) continue; seen.add(h.conversation_id);
+          box.append(el('div', { class: 'pane-item hit', onclick: () => openConv(activePane(), h.conversation_id) }, el('div', { class: 'body' }, el('div', { class: 'title truncate' }, h.title || 'New chat'), el('div', { class: 'snip', html: hl(h.snippet) }))));
+        }
+        if (seen.size) list.append(box);
+      }, 250);
       for (const c of items) {
         const g = groupLabel(c.updated_at); if (g !== last) { list.append(el('div', { class: 'pane-group' }, g)); last = g; }
         const a = assistantOf(c.assistant_id); const running = !!S.live[c.id] || c.running;
@@ -432,12 +447,14 @@
     const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { for (const f of e.target.files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } e.target.value = ''; renderPills(); } });
     const modelBtn = el('button', { class: 'btn quiet sm modelbtn', title: 'Change model (same menu as the pill in the top bar)' }, el('span', { class: 'truncate' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : 'pick a model'), I('chevron', 'xs'));
     modelBtn.addEventListener('click', () => openModelMenu(pane, modelBtn));
+    const researchBtn = el('button', { class: 'btn quiet sm' + (pane.sel.research ? ' on' : ''), title: 'Research mode: plan searches, read sources, write a cited report (more tool rounds)', onclick: () => { pane.sel.research = !pane.sel.research; render(); } }, I('globe', 'sm'), 'Research');
+    const kbBtn = el('button', { class: 'btn quiet sm' + (pane.sel.knowledge ? ' on' : ''), title: 'Knowledge: put matching excerpts from your indexed folders into context for each message', onclick: () => { pane.sel.knowledge = !pane.sel.knowledge; render(); } }, I('box', 'sm'), 'Knowledge');
     const styleBtn = el('button', { class: 'btn quiet sm', title: 'Writing style' }, I('wand', 'sm'), t.style && t.style.id !== 'normal' ? t.style.name : 'Style');
     styleBtn.addEventListener('click', () => menu(styleBtn, (S.st.styles || []).map((s) => ({ label: s.name, sub: s.prompt ? s.prompt.slice(0, 40) + '…' : '', id: s.id, selected: s.id === (t.styleId || 'normal') })), { onPick: (it) => setStyle(pane, it.id) }));
     const bar = el('div', { class: 'bar' },
       el('button', { class: 'btn quiet icon sm', title: 'Attach file or image', onclick: () => fileInput.click() }, I('paperclip', 'sm')), fileInput,
       el('button', { class: 'btn quiet icon sm', title: 'New chat in this pane (Ctrl/⌘ Shift O)', onclick: () => newConv(pane) }, I('plus', 'sm')),
-      styleBtn,
+      styleBtn, researchBtn, kbBtn,
       el('span', { class: 'spacer' }),
       modelBtn,
       live ? el('button', { class: 'stop', onclick: () => stopTurn(pane) }, I('stop', 'sm'), 'Stop') : el('button', { class: 'send', title: 'Send', onclick: () => send(pane), disabled: !t.provider }, I('send', 'sm')));
@@ -447,6 +464,8 @@
       const toolsOn = pane.sel.tools !== false;
       if (t.provider?.kind !== 'agentserver') pills.append(el('span', { class: 'chip' + (toolsOn ? ' primary' : ''), title: toolsOn ? 'local tools on' : 'local tools off' }, I('wrench', 'xs'), toolsOn ? `${S.st.tools.length} tools` : 'tools off', el('button', { title: toolsOn ? 'turn tools off' : 'turn tools on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, toolsOn ? '✕' : '＋')));
       if (pane.sel.thinking) pills.append(el('span', { class: 'chip info' }, I('brain', 'xs'), THINK_LABEL[pane.sel.thinking], el('button', { title: 'back to provider default', onclick: () => { pane.sel.thinking = ''; render(); } }, '✕')));
+      if (pane.sel.research) pills.append(el('span', { class: 'chip info' }, I('globe', 'xs'), 'research', el('button', { title: 'normal mode', onclick: () => { pane.sel.research = false; render(); } }, '✕')));
+      if (pane.sel.knowledge) pills.append(el('span', { class: 'chip' }, I('box', 'xs'), 'knowledge', el('button', { title: 'no knowledge retrieval', onclick: () => { pane.sel.knowledge = false; render(); } }, '✕')));
       if (t.style && t.style.id !== 'normal') pills.append(el('span', { class: 'chip' }, I('wand', 'xs'), t.style.name, el('button', { title: 'normal style', onclick: () => setStyle(pane, '') }, '✕')));
       pane.attachments.forEach((a, i) => pills.append(el('span', { class: 'chip' }, a.data_url ? '🖼' : '📄', a.name, el('button', { onclick: () => { pane.attachments.splice(i, 1); renderPills(); } }, '✕'))));
       pills.classList.toggle('hidden', !pills.children.length);
@@ -463,6 +482,9 @@
       { label: '/artifacts', sub: 'open generated artifacts', icon: 'box', run: () => openDrawer('artifacts') },
       { label: '/tools', sub: pane.sel.tools === false ? 'turn local tools on' : 'turn local tools off', icon: 'wrench', run: () => { pane.sel.tools = pane.sel.tools === false; render(); } },
       { label: '/think', sub: 'cycle thinking: default → on → max → off', icon: 'brain', run: () => cycleThinking(pane) },
+      { label: '/research', sub: pane.sel.research ? 'research mode off' : 'research mode: searches, sources, cited report', icon: 'globe', run: () => { pane.sel.research = !pane.sel.research; render(); } },
+      { label: '/knowledge', sub: pane.sel.knowledge ? 'knowledge retrieval off' : 'put knowledge-base excerpts into context', icon: 'box', run: () => { pane.sel.knowledge = !pane.sel.knowledge; render(); } },
+      { label: '/remember', sub: 'save a memory: /remember <fact>', icon: 'brain', insert: 'Remember this for future chats: ' },
       { label: '/clear', sub: 'clear the draft', icon: 'x', run: () => { pane.draft = ''; render(); } },
       { group: 'Assistants' }, ...S.st.assistants.map((a) => ({ label: `/assistant ${a.id}`, sub: a.name, icon: 'sparkles', run: () => setAssistant(pane, a.id) })),
       { group: 'Styles' }, ...(S.st.styles || []).map((s) => ({ label: `/style ${s.id}`, sub: s.name, icon: 'wand', run: () => setStyle(pane, s.id) })),
@@ -472,6 +494,7 @@
   function newConv(pane) { pane.convId = null; pane.conv = null; pane.messages = []; pane.branches = {}; pane.editing = null; S.view = 'chat'; render(); $('.composerInput', paneEl(pane))?.focus(); }
   async function openConv(pane, id) {
     const c = await api('/api/conversations/' + id); pane.convId = id; pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; pane.editing = null; S.view = 'chat'; render();
+    if ((S.convs.find((x) => x.id === id) || {}).running && !S.live[id]) attachStream(pane, id);  // a turn still running on the server: follow it
   }
   async function stopTurn(pane) { if (pane.convId) await api(`/api/chat/${pane.convId}/stop`, { method: 'POST' }).catch(() => {}); const live = S.live[pane.convId]; if (live?.abort) live.abort.abort(); }
   async function refreshConv(convId) {
@@ -502,11 +525,32 @@
     const live = { convId, node, userNode, content, abort: new AbortController(), textBuf: '', thinkBuf: '', mdEl: null, thinkEl: null, statusEl: null, cards: {} };
     S.live[convId] = live;
     render();
+    try {
+      const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ conversation_id: convId, text, provider_id: t.pid, model: t.model, assistant_id: t.aid, attachments: atts, tools: opts.tools !== undefined ? opts.tools : (pane.sel.tools === false ? 'none' : null), thinking: t.thinking, style_id: t.styleId || '', branch_from: opts.branchFrom || '', mode: pane.sel.research ? 'research' : '', knowledge: !!pane.sel.knowledge }), signal: live.abort.signal });
+      if (!r.ok) throw new Error((await r.text()) || r.statusText);
+      await pumpStream(r, pane, live);
+    } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); await endLive(pane, live); }
+  }
+  // A turn that is running on the server while this tab was away: replay its buffered events into a live node, then follow.
+  async function attachStream(pane, convId) {
+    if (!convId || S.live[convId]) return false;
+    let r; try { r = await fetch(`/api/chat/${convId}/stream?after=0`, { headers: headers() }); } catch { return false; }
+    if (!r.ok) return false;
+    const lastUser = [...pane.messages].reverse().find((m) => m.role === 'user');
+    if (lastUser) pane.messages = pane.messages.slice(0, pane.messages.indexOf(lastUser) + 1);  // the buffer re-renders this turn
+    const t = targetOf(pane); const { node, content } = assistantTurn(pane, t.model);
+    const live = { convId, node, userNode: null, content, abort: new AbortController(), textBuf: '', thinkBuf: '', mdEl: null, thinkEl: null, statusEl: null, cards: {}, attached: true };
+    S.live[convId] = live; render();
+    try { await pumpStream(r, pane, live); } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); await endLive(pane, live); }
+    return true;
+  }
+  async function endLive(pane, live) { if (S.live[live.convId] !== live) return; delete S.live[live.convId]; await refreshConv(live.convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); }
+  async function pumpStream(r, pane, live) {
+    const { node, content } = live;
     const scrollOf = () => { const inner = node.closest('.chat-inner'); return inner ? inner.parentElement : null; };
     const flush = () => { if (!live.mdEl) { live.mdEl = el('div', { class: 'md cursor' }); content.append(live.mdEl); } live.mdEl.innerHTML = md(live.textBuf); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; };
+    const status = (text, keep) => { if (!text) { live.statusEl?.remove(); live.statusEl = null; return; } if (!live.statusEl) { live.statusEl = el('div', { class: 'status-line' }); content.append(live.statusEl); } live.statusEl.innerHTML = ''; live.statusEl.append(I('activity', 'xs'), text); if (!keep) setTimeout(() => { if (live.statusEl && live.statusEl.textContent === text) { live.statusEl.remove(); live.statusEl = null; } }, 6000); };
     try {
-      const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ conversation_id: convId, text, provider_id: t.pid, model: t.model, assistant_id: t.aid, attachments: atts, tools: opts.tools !== undefined ? opts.tools : (pane.sel.tools === false ? 'none' : null), thinking: t.thinking, style_id: t.styleId || '', branch_from: opts.branchFrom || '' }), signal: live.abort.signal });
-      if (!r.ok) throw new Error((await r.text()) || r.statusText);
       const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
       while (true) {
         const { value, done } = await reader.read(); if (done) break;
@@ -518,8 +562,7 @@
           handle(ev);
         }
       }
-    } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); }
-    finally { delete S.live[convId]; await refreshConv(convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); }
+    } finally { await endLive(pane, live); }
     function handle(ev) {
       switch (ev.type) {
         case 'text_delta': live.textBuf += ev.text; flush(); break;
@@ -527,13 +570,24 @@
         case 'tool_call': { if (live.mdEl) live.mdEl.classList.remove('cursor'); live.mdEl = null; live.textBuf = ''; const c = toolCard(ev, null); live.cards[ev.id] = { card: c, call: ev }; content.append(c); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; break; }
         case 'tool_result': { const k = live.cards[ev.id]; const nc = toolCard(k ? k.call : { name: ev.name, arguments: {} }, ev); if (k) k.card.replaceWith(nc); else content.append(nc); live.cards[ev.id] = { card: nc, call: k ? k.call : { name: ev.name } }; if (S.drawer.open && /write|edit|create|move|delete|run_shell/.test(ev.name)) loadTree(S.drawer.path); break; }
         case 'approval_required': { const a = el('div', { class: 'approval', 'data-approval': ev.id }, el('div', { class: 'ttl' }, I('alert', 'sm'), `${ev.name} wants to run`, el('span', { class: 'muted tiny', style: 'font-weight:400' }, ev.reason || '')), el('pre', {}, JSON.stringify(ev.arguments, null, 1).slice(0, 2000)), el('div', { class: 'row' }, ...[['Allow once', 'allow', 'btn primary sm'], ['Allow for this chat', 'allow_session', 'btn sm'], ['Always allow', 'allow_always', 'btn sm'], ['Deny', 'deny', 'btn danger sm']].map(([l, d, cls]) => el('button', { class: cls, onclick: async () => { await api('/api/approvals/' + ev.id, { method: 'POST', body: { decision: d } }).catch((e) => toast(e.message, true)); a.remove(); } }, l)))); content.append(a); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; break; }
-        case 'remote_tool': case 'status': { if (!live.statusEl) { live.statusEl = el('div', { class: 'status-line' }); content.append(live.statusEl); } live.statusEl.innerHTML = ''; live.statusEl.append(I('activity', 'xs'), ev.type === 'remote_tool' ? `${ev.event} ${ev.name || ''}` : (ev.event === 'max_iterations' ? 'stopped: max iterations reached' : `${ev.event}…`)); break; }
+        case 'remote_tool': status(`${ev.event} ${ev.name || ''}`, true); break;
+        case 'status': {
+          const d = ev.data || {};
+          if (ev.event === 'retry') status(`provider busy, retrying (attempt ${d.attempt + 1}/3)…`, true);
+          else if (ev.event === 'compacting') status('long thread: compacting the earlier part into a summary…', true);
+          else if (ev.event === 'compacted') status(`history compacted · ${d.kept} recent messages kept verbatim`);
+          else if (ev.event === 'knowledge') status(`${(d.hits || []).length} knowledge excerpts in context: ${(d.hits || []).map((h) => baseName(h.path)).slice(0, 4).join(', ')}`);
+          else if (ev.event === 'max_iterations') status('stopped: max iterations reached', true);
+          else if (ev.event === 'tools_unsupported') status('this model server cannot call tools (vLLM without --enable-auto-tool-choice): answering without them', true);
+          else status(`${ev.event}…`, true);
+          break;
+        }
         case 'error': content.append(el('div', { class: 'error-line' }, ev.message)); break;
-        case 'done': if (live.statusEl) live.statusEl.remove(); if (live.mdEl) live.mdEl.classList.remove('cursor'); break;
+        case 'done': status(''); if (live.mdEl) live.mdEl.classList.remove('cursor'); break;
       }
     }
   }
-  setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } } catch {} }, 6000);
+  setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } for (const p of S.panes) { const c = S.convs.find((x) => x.id === p.convId); if (c && c.running && !S.live[p.convId]) attachStream(p, p.convId); } } catch {} }, 6000);
   // a deployed update: when the server's version no longer matches the assets this tab loaded, reload (between turns) so nobody keeps an old UI
   const LOADED_VERSION = (document.querySelector('script[src*="app.js"]')?.getAttribute('src') || '').split('v=')[1] || '';
   setInterval(async () => { try { const h = await fetch('/api/health').then((r) => r.json()); if (LOADED_VERSION && h.version && h.version !== LOADED_VERSION && !Object.keys(S.live).length) { toast(`Updated to ${h.version}, reloading…`); setTimeout(() => location.reload(), 1200); } } catch {} }, 45000);
@@ -749,7 +803,7 @@
   // ---------------------------------------------------------------- settings
   const SETTINGS_NAV = [
     { grp: 'Models' }, { id: 'providers', label: 'Model providers', icon: 'cloud' }, { id: 'default', label: 'Defaults & presets', icon: 'box' },
-    { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'styles', label: 'Writing styles', icon: 'wand' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
+    { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'knowledge', label: 'Knowledge base', icon: 'box' }, { id: 'memory', label: 'Memory', icon: 'brain' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'styles', label: 'Writing styles', icon: 'wand' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
     { grp: 'Studio' }, { id: 'audit', label: 'Audit log', icon: 'list' }, { id: 'general', label: 'General', icon: 'settings' },
   ];
   function renderSettings() {
@@ -759,7 +813,7 @@
     for (const n of SETTINGS_NAV) { if (n.grp) { nav.append(el('div', { class: 'grp' }, n.grp)); continue; } nav.append(el('button', { class: S.settingsPage === n.id ? 'active' : '', onclick: () => { S.settingsPage = n.id; render(); } }, I(n.icon, 'sm'), n.label)); }
     root.append(nav);
     const content = el('div', { class: 'scontent' }); root.append(content);
-    ({ providers: pageProviders, default: pageDefault, mcp: pageMcp, tools: pageTools, assistants: pageAssistants, styles: pageStyles, agents: pageAgents, audit: pageAudit, general: pageGeneral }[S.settingsPage] || pageProviders)(content);
+    ({ providers: pageProviders, default: pageDefault, mcp: pageMcp, tools: pageTools, knowledge: pageKnowledge, memory: pageMemory, assistants: pageAssistants, styles: pageStyles, agents: pageAgents, audit: pageAudit, general: pageGeneral }[S.settingsPage] || pageProviders)(content);
     return root;
   }
   const page = (title, sub, ...kids) => el('div', { class: 'page' }, el('h1', {}, title, sub ? el('small', {}, sub) : null), ...kids);
@@ -882,7 +936,14 @@
     const selRO = el('select', { class: 'select' }, ...['allow', 'ask', 'block'].map((v) => el('option', { value: v, selected: v === pol.read_only_default }, v)));
     const ws = el('input', { class: 'input', value: bt.workspace || '', placeholder: bt.workspace_resolved });
     const sw = { shell: bt.shell, filesystem: bt.filesystem, web: bt.web };
-    polCard.append(el('h3', {}, 'Defaults'), el('div', { class: 'grid2' }, field('Tools that write or run things', selDef, 'ask = pause and show an approval card'), field('Read-only tools', selRO)), el('div', { class: 'sect' }, 'Local tools'), field('Workspace folder', ws, 'Local file and shell tools cannot leave this folder.'), el('div', { class: 'row' }, ...Object.keys(sw).map((k) => el('span', { class: 'row' }, switchEl(sw[k], (v) => { sw[k] = v; }), k === 'web' ? 'web fetch' : k))), el('div', {}, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/policy', { method: 'PUT', body: { ...pol, default: selDef.value, read_only_default: selRO.value } }); await api('/api/builtin-tools', { method: 'PUT', body: { ...sw, workspace: ws.value.trim() } }); toast('saved'); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, 'Save')));
+    const wsc = { ...(bt.web_search || { provider: 'duckduckgo', api_key: '', api_key_env: '', url: '' }) };
+    const wsProv = el('select', { class: 'select', onchange: (e) => { wsc.provider = e.target.value; } }, ...[['duckduckgo', 'DuckDuckGo · no key'], ['tavily', 'Tavily · API key'], ['brave', 'Brave Search · API key'], ['serper', 'Serper (Google) · API key'], ['searxng', 'SearXNG · your own URL']].map(([v, l]) => el('option', { value: v, selected: v === wsc.provider }, l)));
+    const wsKey = el('input', { class: 'input', type: 'password', placeholder: wsc.has_key ? 'saved · type to replace' : 'API key (tavily / brave / serper)', oninput: (e) => { wsc.api_key = e.target.value; } });
+    const wsEnv = el('input', { class: 'input', value: wsc.api_key_env || '', placeholder: 'or an env var name, e.g. TAVILY_API_KEY', oninput: (e) => { wsc.api_key_env = e.target.value.trim(); } });
+    const wsUrl = el('input', { class: 'input', value: wsc.url || '', placeholder: 'https://searx.example.com (searxng only)', oninput: (e) => { wsc.url = e.target.value.trim(); } });
+    polCard.append(el('h3', {}, 'Defaults'), el('div', { class: 'grid2' }, field('Tools that write or run things', selDef, 'ask = pause and show an approval card'), field('Read-only tools', selRO)), el('div', { class: 'sect' }, 'Local tools'), field('Workspace folder', ws, 'Local file and shell tools cannot leave this folder.'), el('div', { class: 'row' }, ...Object.keys(sw).map((k) => el('span', { class: 'row' }, switchEl(sw[k], (v) => { sw[k] = v; }), k === 'web' ? 'web fetch + search' : k))),
+      el('div', { class: 'sect' }, 'Web search'), el('div', { class: 'muted tiny' }, 'The web_search tool (and Research mode) use one search API. DuckDuckGo works without a key; the others are faster and cleaner.'), el('div', { class: 'grid2' }, field('Provider', wsProv), field('API key', wsKey)), el('div', { class: 'grid2' }, field('Key from environment', wsEnv), field('SearXNG URL', wsUrl)),
+      el('div', {}, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/policy', { method: 'PUT', body: { ...pol, default: selDef.value, read_only_default: selRO.value } }); const body = { ...sw, workspace: ws.value.trim(), web_search: { provider: wsc.provider, api_key: wsc.api_key || (wsc.has_key ? '…' : ''), api_key_env: wsc.api_key_env || '', url: wsc.url || '' } }; await api('/api/builtin-tools', { method: 'PUT', body }); toast('saved'); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, 'Save')));
     const tb = el('tbody');
     for (const t of S.st.tools) {
       const sel = el('select', { class: 'select', onchange: async (e) => { const rules = { ...pol.rules }; if (e.target.value) rules[t.full_name] = e.target.value; else delete rules[t.full_name]; await api('/api/policy', { method: 'PUT', body: { ...pol, rules } }); pol.rules = rules; toast('rule saved'); } }, el('option', { value: '' }, 'default'), ...['allow', 'ask', 'block'].map((v) => el('option', { value: v, selected: pol.rules[t.full_name] === v }, v)));
@@ -927,6 +988,41 @@
     const tb = el('tbody'); const wrap = page('Audit log', 'every tool call, decision and result', el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => { S.settingsPage = 'audit'; render(); } }, I('refresh', 'sm'), 'Refresh')), el('div', { class: 'table-wrap' }, el('table', { class: 'table' }, el('thead', {}, el('tr', {}, el('th', {}, 'time'), el('th', {}, 'tool'), el('th', {}, 'decision'), el('th', {}, 'took'), el('th', {}, 'arguments'), el('th', {}, 'result'))), tb)));
     content.append(wrap);
     try { const rows = await api('/api/audit?limit=300'); for (const r of rows) tb.append(el('tr', {}, el('td', { class: 'muted tiny' }, new Date(r.ts * 1000).toLocaleString()), el('td', { class: 'mono' }, r.tool), el('td', {}, el('span', { class: 'chip ' + (r.is_error ? 'err' : r.decision === 'allow' || r.decision === 'human' ? 'ok' : 'warn') }, r.decision + (r.is_error ? ' · error' : ''))), el('td', {}, fmtMs(r.duration_ms)), el('td', { class: 'mono' }, (r.arguments || '').slice(0, 160)), el('td', { class: 'mono' }, (r.result_excerpt || '').slice(0, 160)))); if (!rows.length) tb.append(el('tr', {}, el('td', { colspan: 6, class: 'muted' }, 'Nothing yet.'))); } catch (e) { toast(e.message, true); }
+  }
+  // ---- memory: facts the assistant keeps across chats (it saves them with memory_save; you can add, edit, delete)
+  async function pageMemory(content) {
+    const mem = S.st.memory || { enabled: true, recall_k: 5 };
+    const on = switchEl(mem.enabled, async (v) => { try { await api('/api/memory-settings', { method: 'PUT', body: { enabled: v, recall_k: mem.recall_k } }); await loadState(); toast(v ? 'memory on' : 'memory off'); } catch (e) { toast(e.message, true); } });
+    const k = el('input', { class: 'input', type: 'number', value: mem.recall_k, style: 'width:90px', onchange: async (e) => { try { await api('/api/memory-settings', { method: 'PUT', body: { enabled: mem.enabled, recall_k: parseInt(e.target.value || '5', 10) } }); await loadState(); toast('saved'); } catch (err) { toast(err.message, true); } } });
+    const add = el('textarea', { class: 'textarea', style: 'min-height:70px', placeholder: 'Something to remember, e.g. "My webtoon is called Backstage; the uc board is the default."' });
+    const listBox = el('div', { style: 'display:grid;gap:8px' });
+    const refresh = async () => { const r = await api('/api/memory'); listBox.innerHTML = ''; if (!r.items.length) listBox.append(el('div', { class: 'muted tiny' }, 'Nothing remembered yet. The assistant saves facts with the memory_save tool when you ask it to remember something, or add one here.')); for (const m of r.items) { const ta = el('textarea', { class: 'textarea', style: 'min-height:44px', value: m.text }); listBox.append(el('div', { class: 'card', style: 'padding:10px 12px;gap:6px' }, ta, el('div', { class: 'row' }, el('span', { class: 'muted tiny' }, `${new Date(m.updated_at * 1000).toLocaleString()}${m.source ? ' · ' + m.source : ''}`), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', onclick: async () => { try { await api('/api/memory/' + m.id, { method: 'PUT', body: { text: ta.value } }); toast('saved'); } catch (e) { toast(e.message, true); } } }, 'Save'), el('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Forget this memory?', 'Forget')) { await api('/api/memory/' + m.id, { method: 'DELETE' }); refresh(); } } }, 'Forget')))); } };
+    content.append(page('Memory', 'what the assistant remembers about you across chats',
+      el('div', { class: 'card' }, el('h3', {}, 'Recall', el('span', { class: 'spacer' }), el('span', { class: 'muted tiny' }, 'enabled'), on), el('div', { class: 'muted tiny' }, 'Before each answer the best-matching memories are placed in the system prompt. The assistant can also search them (memory_search) and add new ones (memory_save).'), field('Memories recalled per message', k)),
+      el('div', { class: 'card' }, el('h3', {}, 'Add a memory'), add, el('div', {}, el('button', { class: 'btn primary', onclick: async () => { const t = add.value.trim(); if (!t) return; try { await api('/api/memory', { method: 'POST', body: { text: t } }); add.value = ''; refresh(); toast('remembered'); } catch (e) { toast(e.message, true); } } }, I('plus', 'sm'), 'Remember'))),
+      el('div', { class: 'card' }, el('h3', {}, 'Memories'), listBox)));
+    try { await refresh(); } catch (e) { toast(e.message, true); }
+  }
+  // ---- knowledge base: folders and files indexed for retrieval (keyword search always, embeddings optional)
+  async function pageKnowledge(content) {
+    const kc = S.st.knowledge || {};
+    const pathIn = el('input', { class: 'input', placeholder: 'Folder or file to index, e.g. D:\\notes or /home/me/docs' });
+    const srcBox = el('div', { style: 'display:grid;gap:6px' });
+    const statusBox = el('div', { class: 'muted tiny' });
+    const prov = el('select', { class: 'select', onchange: () => fillModels() }, el('option', { value: '' }, '(keyword search only)'), ...S.st.providers.filter((p) => p.kind === 'openai').map((p) => el('option', { value: p.id, selected: p.id === kc.embeddings_provider }, p.label || p.id)));
+    const modelIn = el('input', { class: 'input', value: kc.embeddings_model || '', placeholder: 'text-embedding-v4 · text-embedding-3-small · …', list: 'embModels' });
+    const dl = el('datalist', { id: 'embModels' }, ...['text-embedding-v4', 'text-embedding-v3', 'text-embedding-3-small', 'text-embedding-3-large', 'bge-m3', 'nomic-embed-text'].map((m) => el('option', { value: m })));
+    const fillModels = () => { if (!modelIn.value) modelIn.value = prov.value.includes('dashscope') ? 'text-embedding-v4' : prov.value.includes('openai') ? 'text-embedding-3-small' : ''; };
+    const chunk = el('input', { class: 'input', type: 'number', value: kc.chunk_chars || 900, style: 'width:110px' });
+    const topk = el('input', { class: 'input', type: 'number', value: kc.top_k || 6, style: 'width:90px' });
+    const q = el('input', { class: 'input', placeholder: 'Try a search…', onkeydown: async (e) => { if (e.key === 'Enter' && q.value.trim()) { const r = await api('/api/knowledge/search?q=' + encodeURIComponent(q.value.trim())); hits.innerHTML = ''; if (!r.hits.length) hits.append(el('div', { class: 'muted tiny' }, 'no matches')); for (const h of r.hits) hits.append(el('div', { class: 'card', style: 'padding:10px 12px;gap:4px' }, el('div', { class: 'mono tiny truncate' }, `${h.path} · chunk ${h.idx} · ${h.score}`), el('div', { style: 'white-space:pre-wrap;font-size:12.5px' }, h.text.slice(0, 600)))); } } });
+    const hits = el('div', { style: 'display:grid;gap:6px' });
+    const refresh = async () => { const st = await api('/api/knowledge'); srcBox.innerHTML = ''; for (const s of st.sources || []) srcBox.append(el('div', { class: 'row', style: 'font-size:12.5px' }, I('box', 'sm'), el('span', { class: 'mono truncate', style: 'flex:1' }, s.path), el('span', { class: 'chip' }, `${s.files} files`), el('span', { class: 'chip' }, `${s.chunks} chunks`), s.error ? el('span', { class: 'chip err' }, s.error.slice(0, 60)) : null, el('button', { class: 'btn quiet icon sm', title: 'remove from the index', onclick: async () => { if (await confirmDialog(`Remove ${s.path} from the knowledge base?`, 'Remove')) { await api('/api/knowledge/sources/' + s.id, { method: 'DELETE' }); refresh(); } } }, I('trash', 'xs')))); if (!(st.sources || []).length) srcBox.append(el('div', { class: 'muted tiny' }, 'No sources yet. Add a folder of notes, docs or code.')); statusBox.textContent = `${st.chunks} chunks · ${st.vectors} with embeddings · ${st.indexing ? 'indexing…' : 'idle'}${st.last && st.last.seconds != null ? ` · last run ${st.last.seconds}s${st.last.embed_error ? ' · embeddings: ' + st.last.embed_error : ''}` : ''}`; if (st.indexing) setTimeout(refresh, 2000); };
+    content.append(page('Knowledge base', 'your folders and files, searchable by the assistant and injected on demand',
+      el('div', { class: 'card' }, el('h3', {}, 'Sources'), srcBox, el('div', { class: 'row' }, pathIn, el('button', { class: 'btn primary', onclick: async () => { const p = pathIn.value.trim(); if (!p) return; try { await api('/api/knowledge/sources', { method: 'POST', body: { path: p } }); pathIn.value = ''; toast('added · indexing'); setTimeout(refresh, 800); } catch (e) { toast(e.message, true); } } }, I('plus', 'sm'), 'Add'), el('button', { class: 'btn', onclick: async () => { await api('/api/knowledge/reindex', { method: 'POST' }); toast('reindexing'); setTimeout(refresh, 800); } }, I('refresh', 'sm'), 'Reindex')), statusBox, el('div', { class: 'muted tiny' }, 'Files are chunked and indexed for substring search (any language). Changed files are re-read on reindex. In chat, switch on Knowledge in the composer to put the best excerpts into context, or let the assistant call knowledge_search.')),
+      el('div', { class: 'card' }, el('h3', {}, 'Embeddings (optional)'), el('div', { class: 'muted tiny' }, 'Semantic search on top of keyword search: any OpenAI-compatible /embeddings endpoint (DashScope text-embedding-v4, OpenAI text-embedding-3-small, a local vLLM). Vectors are computed on reindex.'), el('div', { class: 'grid2' }, field('Provider', prov), field('Model', el('div', {}, modelIn, dl))), el('div', { class: 'grid2' }, field('Chunk size (chars)', chunk), field('Excerpts per message', topk)), el('div', {}, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/knowledge/settings', { method: 'PUT', body: { embeddings_provider: prov.value, embeddings_model: modelIn.value.trim(), chunk_chars: parseInt(chunk.value || '900', 10), top_k: parseInt(topk.value || '6', 10) } }); toast('saved · reindex to compute embeddings'); await loadState(); } catch (e) { toast(e.message, true); } } }, 'Save'))),
+      el('div', { class: 'card' }, el('h3', {}, 'Test a search'), q, hits)));
+    try { await refresh(); } catch (e) { toast(e.message, true); }
   }
   function pageGeneral(content) {
     const st = S.st;
