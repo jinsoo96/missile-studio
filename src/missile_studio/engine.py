@@ -89,6 +89,18 @@ def _short(text: str, n: int = 90) -> str:
     return t if len(t) <= n else t[: n - 1].rstrip() + "…"
 
 
+_VALIDATION = re.compile(r"validation error|Field required|unexpected keyword|extra inputs are not permitted|missing \d+ required|Input should be|invalid_params|unknown argument", re.I)
+
+
+def _schema_mismatch(schema: Any, args: dict) -> dict:
+    """Required keys that are missing and keys the schema does not know, or {} when the call looks right."""
+    schema = schema if isinstance(schema, dict) else {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    missing = [k for k in (schema.get("required") or []) if k not in (args or {})]
+    unknown = [k for k in (args or {}) if props and k not in props and not schema.get("additionalProperties")]
+    return {"missing": missing, "unknown": unknown} if (missing or unknown) else {}
+
+
 def _compact_schema(schema: Any) -> Any:
     """A JSON schema without the decoration pydantic adds (titles), so a loaded tool costs fewer tokens."""
     if isinstance(schema, dict):
@@ -1017,7 +1029,11 @@ class Engine:
                         plan.append((c, None, "block", "unknown tool"))
                         continue
                     if catalog_on and tool is not LOAD_TOOLS and tool.full_name not in loaded:
-                        loaded.add(tool.full_name)  # called straight from the catalog: fine, and defined from now on
+                        loaded.add(tool.full_name)  # called straight from the catalog: defined from now on
+                        problems = _schema_mismatch(tool.input_schema, args)
+                        if problems:  # guessed argument names: hand back the schema instead of a failed call
+                            plan.append((c, tool, "schema", json.dumps({"error": "arguments do not match the tool's schema (the tool was not run); call it again with these arguments", **problems, "input_schema": _compact_schema(tool.input_schema)}, ensure_ascii=False)))
+                            continue
                     decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous, req.permission)
                     if decision == "ask":
                         yield {"type": "approval_required", "id": c["id"], "name": c["name"], "arguments": args, "reason": reason}
@@ -1045,10 +1061,15 @@ class Engine:
                                 result = self._load_tools(tools, loaded, c.get("arguments") or {})
                             else:
                                 result = await self.call_tool(tool, c.get("arguments") or {})
+                                if result.get("is_error") and _VALIDATION.search(str(result.get("text", ""))):
+                                    # a wrong argument shape: give the schema with the error so the next call is right
+                                    result["text"] = str(result.get("text", "")) + "\nExpected arguments (JSON schema): " + json.dumps(_compact_schema(tool.input_schema), ensure_ascii=False)
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
                             result = {"text": f"{type(e).__name__}: {e}", "is_error": True, "content": []}
+                    elif decision == "schema":
+                        result = {"text": reason, "is_error": True, "content": []}
                     elif decision == "block":
                         result = {"text": f"tool {c['name']} is blocked: {reason or 'policy'}", "is_error": True, "content": []}
                     else:

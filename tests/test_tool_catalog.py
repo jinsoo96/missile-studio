@@ -107,3 +107,29 @@ def test_catalog_in_prompt_mode(client):
     assert "- echo__echo:" in second.split("Available tools:")[1]
     res = [e for e in events if e["type"] == "tool_result"]
     assert res[1]["name"] == "echo__echo" and res[1]["text"] == "yo"
+
+
+def test_guessed_argument_names_get_the_schema_back(client):
+    """A catalogued tool called by name with wrong argument names is not run: the schema comes back, the next
+    call is right. A validation error from a loaded tool carries the schema too."""
+    client.put("/api/policy", json=ALLOW, headers=H)
+    client.put("/api/tool-catalog", json={"mode": "on", "threshold": 24, "always": []}, headers=H)
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    FakeProvider.tools_seen.clear()
+    FakeProvider.script = [
+        [{"type": "tool_call", "id": "g1", "name": "echo__echo", "arguments": {"q": "hi"}}, {"type": "done", "finish_reason": "tool_calls"}],
+        [{"type": "tool_call", "id": "g2", "name": "echo__echo", "arguments": {"text": "hi"}}, {"type": "done", "finish_reason": "tool_calls"}],
+        [{"type": "tool_call", "id": "l1", "name": "local__load_tools", "arguments": {"names": "echo__add"}}, {"type": "done", "finish_reason": "tool_calls"}],
+        [{"type": "tool_call", "id": "g3", "name": "echo__add", "arguments": {"a": 1, "b": "x"}}, {"type": "done", "finish_reason": "tool_calls"}],
+        [{"type": "text_delta", "text": "ok"}, {"type": "done", "finish_reason": "stop"}],
+    ]
+    events = _chat(client, conv["id"], "echo hi")
+    res = [e for e in events if e["type"] == "tool_result"]
+    first = json.loads(res[0]["text"])
+    assert res[0]["is_error"] and first["missing"] == ["text"] and first["unknown"] == ["q"] and "input_schema" in first and res[0]["decision"] == "schema"
+    assert "echo__echo" in FakeProvider.tools_seen[1]  # defined for the retry
+    assert res[1]["name"] == "echo__echo" and res[1]["text"] == "hi" and not res[1]["is_error"]
+    # a loaded tool called with a wrong value type runs and fails on the server: that error carries the schema too
+    assert res[3]["name"] == "echo__add" and res[3]["is_error"] and "Expected arguments (JSON schema)" in res[3]["text"] and '"b"' in res[3]["text"]
+    audit = client.get("/api/audit", headers=H).json()
+    assert not any(a["tool"] == "echo__echo" and a["decision"] == "schema" and a["is_error"] is False for a in audit)
