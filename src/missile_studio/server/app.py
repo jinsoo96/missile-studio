@@ -36,6 +36,7 @@ from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerC
 from ..device_bridge import DeviceBridge
 from ..engine import Engine, TurnRequest
 from ..providers.base import ProviderError
+from ..wake import WakeManager
 from ..mcp.importers import export_standard, import_from, known_sources, parse_servers
 from . import admin as adminmod
 
@@ -181,6 +182,20 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     app.state.turn_streams = {}
     app.state.provider_health = {}  # provider id -> {"state": ok|down|nokey|unknown, "error", "checked_at", "ms"}
 
+    async def on_wake_done(server: str, ok: bool) -> None:
+        """A wake command finished: reconnect the MCP server and re-probe providers (their server may be back)."""
+        if ok and server in engine.mcp.servers:
+            try:
+                await engine.mcp.restart(server)
+            except Exception:  # pragma: no cover
+                log.exception("reconnect after wake failed")
+        try:
+            await refresh_health()
+        except Exception:  # pragma: no cover
+            log.exception("health refresh after wake failed")
+
+    app.state.wake = WakeManager(engine.store.get_setting, engine.store.set_setting, on_wake_done)
+
     # ------------------------------------------------------------ provider health (is this model reachable right now?)
     HOSTED = ("api.openai.com", "openrouter.ai", "dashscope", "api.groq.com", "api.deepseek.com", "api.mistral.ai", "api.x.ai", "api.together", "api.fireworks", "generativelanguage")
 
@@ -188,6 +203,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return pc.kind in ("anthropic", "gemini") or any(h in (pc.base_url or "") for h in HOSTED)
 
     async def check_provider(pc: ProviderConfig) -> dict:
+        engine.sync_endpoint(pc)  # a provider following an endpoint file is probed at its current address
         if pc.kind != "agentserver" and _needs_key(pc) and not pc.resolved_api_key():
             return {"state": "nokey", "error": "no API key saved", "checked_at": time.time(), "ms": 0}
         t0 = time.time()
@@ -323,12 +339,14 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     async def state(request: Request):
         cfg = engine.cfg
         p = principal_of(request)
+        engine.sync_endpoints()
         return {
             "version": __version__,
             "home": str(home_dir()),
             "config_path": str(config_path()),
             "role": p["role"],
             "providers": [_with_health(_mask(x)) for x in cfg.providers],
+            "wake": app.state.wake.status(),
             "presets": PROVIDER_PRESETS,
             "default": cfg.default.model_dump(),
             "assistants": [a.model_dump() for a in cfg.assistants],
@@ -373,6 +391,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     # ------------------------------------------------------------ providers
     @app.get("/api/providers", dependencies=[user_dep])
     async def providers():
+        engine.sync_endpoints()
         return [_with_health(_mask(p)) for p in engine.cfg.providers]
 
     @app.get("/api/providers/health", dependencies=[user_dep])
@@ -503,8 +522,21 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     async def mcp_restart(name: str):
         if name not in engine.mcp.servers:
             raise HTTPException(404, "no such server")
+        cfg = engine.cfg.mcp_servers.get(name)
+        if cfg is not None and (cfg.wake_command or "").strip():
+            # wake whatever this server depends on first (in the background); on_wake_done reconnects it
+            job = app.state.wake.start(name, cfg.wake_command, cfg.wake_cwd, cfg.wake_timeout)
+            return {"ok": True, "wake": job.view()}
         await engine.mcp.restart(name)
         return {"ok": True}
+
+    @app.get("/api/wake", dependencies=[user_dep])
+    async def wake_status():
+        return app.state.wake.status()
+
+    @app.post("/api/wake/{name}/cancel", dependencies=[admin_dep])
+    async def wake_cancel(name: str):
+        return {"ok": app.state.wake.cancel(name)}
 
     @app.get("/api/mcp/import/sources", dependencies=[admin_dep])
     async def mcp_sources():

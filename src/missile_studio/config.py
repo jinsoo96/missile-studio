@@ -79,6 +79,11 @@ class ProviderConfig(BaseModel):
     # tools described in the prompt and called with <tool_call> text blocks: for servers that reject tool
     # definitions (vLLM without a tool-call parser). Switched on automatically the first time such a server answers 400.
     tools_via_prompt: bool = False
+    # A file "base_url|model|api_key" (model and key optional) that this provider follows: when the server it
+    # points at moves (a recreated GPU pod gets a new address and key), whatever rewrites the file moves the provider too.
+    endpoint_file: str = ""
+    # The MCP server whose wake_command brings this provider's server up: offered as a "Wake" button when it is down.
+    wake_server: str = ""
 
     def context_tokens(self) -> int:
         if self.context_window:
@@ -104,6 +109,12 @@ class McpServerConfig(BaseModel):
     enabled: bool = True
     timeout: float = 60.0
     description: str = ""
+    # Run when Restart is pressed, before reconnecting: e.g. wake the GPU server this MCP server works with.
+    # It runs in the background; lines "##progress <pct> <eta_seconds> <stage>" drive the progress bar (otherwise
+    # the last successful run's duration is the estimate). The server reconnects when the command exits 0.
+    wake_command: str = ""
+    wake_cwd: str = ""
+    wake_timeout: float = 2400.0
 
 
 Decision = Literal["allow", "ask", "block"]

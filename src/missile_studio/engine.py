@@ -534,14 +534,63 @@ class Engine:
 
     # ------------------------------------------------------------ providers
     def provider(self, pid: str) -> BaseProvider:
+        pc = self.cfg.provider(pid)
+        if pc is not None:
+            self.sync_endpoint(pc)  # a provider that follows an endpoint file picks up a moved server first
         p = self._providers.get(pid)
         if p is None:
-            pc = self.cfg.provider(pid)
             if pc is None:
                 raise ProviderError(f"provider '{pid}' not configured")
             p = build_provider(pc)
             self._providers[pid] = p
         return p
+
+    def sync_endpoint(self, pc: ProviderConfig) -> bool:
+        """Follow pc.endpoint_file ("base_url|model|api_key", model and key optional). When the file changed, update
+        the provider (and the saved config) and drop its client so the next request uses the new address and key."""
+        path = (pc.endpoint_file or "").strip()
+        if not path:
+            return False
+        try:
+            st = Path(path).expanduser().stat()
+        except OSError:
+            return False
+        seen = getattr(self, "_endpoint_seen", None)
+        if seen is None:
+            seen = self._endpoint_seen = {}
+        stamp = (path, st.st_mtime_ns, st.st_size)
+        if seen.get(pc.id) == stamp:
+            return False
+        seen[pc.id] = stamp
+        try:
+            line = next((ln.strip() for ln in Path(path).expanduser().read_text(encoding="utf-8-sig").splitlines() if ln.strip()), "")
+        except OSError:
+            return False
+        parts = [x.strip() for x in line.split("|")]
+        url, model, key = (parts + ["", "", ""])[:3]
+        changed = False
+        if url and url != pc.base_url:
+            pc.base_url, changed = url, True
+        if key and key != pc.api_key:
+            pc.api_key, changed = key, True
+        if model and model not in (pc.models or []):
+            pc.models, changed = [model] + list(pc.models or []), True
+        if model and not pc.default_model:
+            pc.default_model, changed = model, True
+        if changed:
+            old = self._providers.pop(pc.id, None)
+            if old is not None:
+                try:
+                    asyncio.get_running_loop().create_task(old.aclose())
+                except RuntimeError:  # no running loop (CLI): the old client is just dropped
+                    pass
+            save_config(self.cfg)
+            log.info("provider %s follows %s: %s", pc.id, path, pc.base_url)
+        return changed
+
+    def sync_endpoints(self) -> None:
+        for pc in self.cfg.providers:
+            self.sync_endpoint(pc)
 
     def resolve_target(self, provider_id: str = "", model: str = "", assistant: Optional[AssistantConfig] = None) -> tuple[str, str]:
         pid = provider_id or (assistant.provider if assistant and assistant.provider else "") or self.cfg.default.provider
