@@ -778,6 +778,10 @@ class Engine:
         for a in req.attachments:
             if a.get("data_url"):
                 parts.append({"type": "image_url", "image_url": {"url": a["data_url"]}})
+                if a.get("path"):
+                    # a real file on disk, not just base64 for the model to look at: hand this exact path to any
+                    # tool (local or MCP) that takes a file or reference-image path to use this image with it
+                    parts.append({"type": "text", "text": f"(the image above is saved at {a['path']}; give that exact path to a tool argument that takes a file or reference-image path to use it)"})
             elif a.get("text") is not None:
                 text += f"\n\n--- attached file: {a.get('name', 'file')} ---\n{a['text']}\n--- end of {a.get('name', 'file')} ---"
         parts.insert(0, {"type": "text", "text": text})

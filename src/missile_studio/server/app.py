@@ -834,7 +834,14 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             raise HTTPException(413, f"file too large ({max_mb}MB)")
         ctype = file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
         if ctype.startswith("image/"):
-            return {"name": file.filename, "data_url": f"data:{ctype};base64,{base64.b64encode(data).decode()}", "size": len(data)}
+            # also saved to disk (not just kept as base64 for the model to see): a saved path is something the
+            # model can hand to any tool that takes a file or reference-image path, in this MCP server or another
+            uploads_dir = engine.local.workspace / "uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^\w.\-]+", "_", Path(file.filename or "upload").name)[:120] or "upload"
+            dest = uploads_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}-{safe_name}"
+            dest.write_bytes(data)
+            return {"name": file.filename, "data_url": f"data:{ctype};base64,{base64.b64encode(data).decode()}", "size": len(data), "path": str(dest)}
         text: Optional[str] = None
         if ctype == "application/pdf" or (file.filename or "").lower().endswith(".pdf"):
             try:

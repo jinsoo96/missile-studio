@@ -135,7 +135,21 @@ def test_upload_text_and_image(client, tmp_path):
     r = client.post("/api/upload", files={"file": ("a.txt", b"hello", "text/plain")}, headers=H)
     assert r.json()["text"] == "hello"
     r = client.post("/api/upload", files={"file": ("a.png", b"\x89PNG....", "image/png")}, headers=H)
-    assert r.json()["data_url"].startswith("data:image/png;base64,")
+    up = r.json()
+    assert up["data_url"].startswith("data:image/png;base64,")
+    # an image is also saved to disk (not just kept as base64): a path a tool call can reference, in this MCP
+    # server or another, to use the uploaded picture (e.g. as a reference image for a compositing tool)
+    from pathlib import Path
+
+    saved = Path(up["path"])
+    assert saved.is_file() and saved.read_bytes() == b"\x89PNG...." and saved.name.endswith("a.png")
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    FakeProvider.script = [[{"type": "text_delta", "text": "got it"}, {"type": "done", "finish_reason": "stop"}]]
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "use this", "attachments": [up], "tools": "none"}, headers=H) as resp:
+        read_sse(resp)
+    sent = FakeProvider.seen[-1][-1]["content"]  # the user message just sent to the model
+    assert any(p.get("type") == "image_url" for p in sent)
+    assert any(p.get("type") == "text" and str(saved) in p.get("text", "") for p in sent)
 
 
 def test_stop_during_tool_closes_pending_calls(client):

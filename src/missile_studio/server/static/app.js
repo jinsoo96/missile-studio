@@ -498,7 +498,7 @@
       if (pane.sel.research) pills.append(el('span', { class: 'chip info' }, I('globe', 'xs'), 'research', el('button', { title: 'normal mode', onclick: () => { pane.sel.research = false; render(); } }, '✕')));
       if (pane.sel.knowledge) pills.append(el('span', { class: 'chip' }, I('box', 'xs'), 'knowledge', el('button', { title: 'no knowledge retrieval', onclick: () => { pane.sel.knowledge = false; render(); } }, '✕')));
       if (t.style && t.style.id !== 'normal') pills.append(el('span', { class: 'chip' }, I('wand', 'xs'), t.style.name, el('button', { title: 'normal style', onclick: () => setStyle(pane, '') }, '✕')));
-      pane.attachments.forEach((a, i) => pills.append(el('span', { class: 'chip' }, a.data_url ? '🖼' : '📄', a.name, el('button', { onclick: () => { pane.attachments.splice(i, 1); renderPills(); } }, '✕'))));
+      pane.attachments.forEach((a, i) => pills.append(el('span', { class: 'chip', title: a.path ? `saved to ${a.path} · tools can use this path` : '' }, a.data_url ? '🖼' : '📄', a.name, el('button', { onclick: () => { pane.attachments.splice(i, 1); renderPills(); } }, '✕'))));
       pills.classList.toggle('hidden', !pills.children.length);
     }
     renderPills();
