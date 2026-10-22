@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "missile-studio"
-version = "0.6.0"
+version = "0.6.1"
 description = "Your own LLM studio: many model providers, local MCP servers, remote agent servers, one agent loop. Web UI + terminal, installable anywhere, usable over SSH."
 readme = "README.md"
 license = "Apache-2.0"

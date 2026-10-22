@@ -139,11 +139,11 @@ class OpenAICompatProvider(BaseProvider):
                             body.pop("stream_options", None)  # some servers reject it
                             continue
                         if "tools" in body and _TOOLS_UNSUPPORTED.search(msg):
-                            # vLLM without --enable-auto-tool-choice (and similar servers): answer without tools
-                            body.pop("tools", None)
-                            body.pop("tool_choice", None)
+                            # vLLM without --enable-auto-tool-choice (and similar servers): tell the engine, which
+                            # re-sends with the tools described in the prompt instead (see ToolCallScanner)
                             yield {"type": "status", "event": "tools_unsupported", "data": {"message": msg[:300]}}
-                            continue
+                            yield {"type": "done", "finish_reason": "tools_unsupported"}
+                            return
                         yield {"type": "error", "message": msg}
                         return
                     async for ev in self._consume(resp, pending):

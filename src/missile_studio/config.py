@@ -76,6 +76,9 @@ class ProviderConfig(BaseModel):
     password: str = ""
     allow_insecure_tls: bool = False
     context_window: int = 0  # tokens the model accepts; 0 = a sensible guess per kind (used for compaction)
+    # tools described in the prompt and called with <tool_call> text blocks: for servers that reject tool
+    # definitions (vLLM without a tool-call parser). Switched on automatically the first time such a server answers 400.
+    tools_via_prompt: bool = False
 
     def context_tokens(self) -> int:
         if self.context_window:

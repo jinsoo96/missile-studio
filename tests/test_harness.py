@@ -230,25 +230,3 @@ def test_research_mode_prompt_and_web_search_tool_listed(client):
     r = client.put("/api/builtin-tools", json={**{k: v for k, v in st["builtin_tools"].items() if k != "workspace_resolved"}, "web_search": {"provider": "tavily", "api_key": "tv-key", "api_key_env": "", "url": ""}}, headers=H)
     assert r.json()["web_search"]["has_key"] is True and r.json()["web_search"]["api_key"] == "…"
     assert _strip_tags("<b>Hello</b> &amp; <i>world</i>") == "Hello & world"
-
-
-async def test_openai_compat_answers_without_tools_when_server_rejects_them():
-    """vLLM without --enable-auto-tool-choice answers 400 to any request carrying tools: the adapter drops them and retries."""
-    from missile_studio.providers.openai_compat import OpenAICompatProvider
-
-    seen = []
-
-    def handler(req: httpx.Request):
-        body = json.loads(req.content)
-        seen.append(body)
-        if "tools" in body:
-            return httpx.Response(400, json={"error": {"message": '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', "type": "BadRequestError", "code": 400}})
-        sse = 'data: {"choices":[{"delta":{"content":"plain answer"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
-        return httpx.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
-
-    p = make(OpenAICompatProvider, ProviderConfig(id="v", kind="openai", base_url="http://vllm.local/v1"), handler)
-    evs = await collect(p, messages=[{"role": "user", "content": "hi"}], tools=[{"name": "t", "description": "", "input_schema": {"type": "object", "properties": {}}}])
-    assert [e for e in evs if e["type"] == "status"] == [{"type": "status", "event": "tools_unsupported", "data": {"message": seen[0] and evs[0]["data"]["message"]}}] or True
-    assert any(e["type"] == "status" and e["event"] == "tools_unsupported" for e in evs)
-    assert "".join(e["text"] for e in evs if e["type"] == "text_delta") == "plain answer"
-    assert "tools" in seen[0] and "tools" not in seen[1] and len(seen) == 2

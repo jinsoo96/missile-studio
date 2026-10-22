@@ -33,6 +33,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from .config import AssistantConfig, Config, ProviderConfig, load_config, save_config
 from .mcp.manager import SEP, McpManager, ToolInfo
 from .providers import BaseProvider, GenerationOptions, ProviderError, build_provider
+from .providers.base import _json_loads_lenient
 from .knowledge import Knowledge
 from .store import Store, _message_text
 from .tools.builtin import LOCAL, LocalTools, is_dangerous_command, match_rule
@@ -49,6 +50,94 @@ _FATAL = re.compile(r"\b(400|401|402|403|404|413|422)\b")
 
 def _retryable(msg: str) -> bool:
     return bool(_RETRYABLE.search(msg)) and not _FATAL.search(msg)
+
+
+# ---------------------------------------------------------------- tools through the prompt (servers without a tool parser)
+TOOL_CALL_OPEN, TOOL_CALL_CLOSE = "<tool_call>", "</tool_call>"
+
+
+def _tools_prompt(tools: list) -> str:
+    lines = []
+    for t in tools[:80]:
+        schema = json.dumps(t.input_schema or {"type": "object", "properties": {}}, ensure_ascii=False)
+        lines.append(f"- {t.full_name}: {(t.description or '').strip()[:300]} | arguments: {schema[:900]}")
+    return (
+        "This model server cannot take tool definitions, so tools are called through text. Available tools:\n"
+        + "\n".join(lines)
+        + "\n\nTo call a tool, output exactly this block and nothing after it:\n"
+        + TOOL_CALL_OPEN + '\n{"name": "<tool name>", "arguments": {<arguments as JSON>}}\n' + TOOL_CALL_CLOSE
+        + "\nThe result comes back inside a <tool_response> block; then continue. One block per call, several blocks for several calls. "
+        "Call tools only when they help; otherwise answer directly."
+    )
+
+
+def _promptify(messages: list[dict]) -> list[dict]:
+    """History as plain text for a server that knows no tool roles: calls become <tool_call> blocks in the assistant
+    text, results become user messages wrapped in <tool_response>."""
+    out: list[dict] = []
+    for m in messages:
+        r = m.get("role")
+        if r == "assistant" and m.get("tool_calls"):
+            text = m.get("content") if isinstance(m.get("content"), str) else _message_text(m)
+            tags = "\n".join(TOOL_CALL_OPEN + "\n" + json.dumps({"name": c["name"], "arguments": c.get("arguments") or {}}, ensure_ascii=False) + "\n" + TOOL_CALL_CLOSE for c in m["tool_calls"])
+            out.append({"role": "assistant", "content": (text + "\n" if text else "") + tags})
+        elif r == "tool":
+            out.append({"role": "user", "content": "<tool_response>\n" + json.dumps({"name": m.get("name"), "result": m.get("content"), "is_error": bool(m.get("is_error"))}, ensure_ascii=False) + "\n</tool_response>"})
+        else:
+            out.append({k: v for k, v in m.items() if k != "thinking_blocks"})
+    return out
+
+
+class ToolCallScanner:
+    """Splits a streamed answer into visible text and <tool_call> blocks (Hermes / Qwen style), delta by delta."""
+
+    def __init__(self) -> None:
+        self.buf = ""
+        self.calls: list[dict] = []
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = ""
+        while True:
+            i = self.buf.find(TOOL_CALL_OPEN)
+            if i < 0:
+                keep = self._partial_tail(self.buf, TOOL_CALL_OPEN)
+                out += self.buf[: len(self.buf) - keep]
+                self.buf = self.buf[len(self.buf) - keep :]
+                return out
+            out += self.buf[:i]
+            j = self.buf.find(TOOL_CALL_CLOSE, i)
+            if j < 0:
+                self.buf = self.buf[i:]  # the block is still arriving
+                return out
+            inner = self.buf[i + len(TOOL_CALL_OPEN) : j]
+            self.buf = self.buf[j + len(TOOL_CALL_CLOSE) :]
+            if not self._add(inner):
+                out += inner  # not a call after all: show it
+
+    def flush(self) -> str:
+        if self.buf.startswith(TOOL_CALL_OPEN) and self._add(self.buf[len(TOOL_CALL_OPEN) :]):
+            self.buf = ""
+        out, self.buf = self.buf, ""
+        return out
+
+    def _add(self, inner: str) -> bool:
+        obj = _json_loads_lenient(inner.strip())
+        if isinstance(obj, dict) and obj.get("name"):
+            args = obj.get("arguments")
+            if isinstance(args, str):
+                parsed = _json_loads_lenient(args)
+                args = parsed if isinstance(parsed, dict) else {}
+            self.calls.append({"type": "tool_call", "id": f"call_p{len(self.calls) + 1}_{uuid.uuid4().hex[:6]}", "name": str(obj["name"]), "arguments": args if isinstance(args, dict) else {}})
+            return True
+        return False
+
+    @staticmethod
+    def _partial_tail(s: str, tag: str) -> int:
+        for k in range(min(len(s), len(tag) - 1), 0, -1):
+            if tag.startswith(s[-k:]):
+                return k
+        return 0
 
 
 def _estimate_tokens(messages: list[dict]) -> int:
@@ -447,7 +536,12 @@ class Engine:
                 yield {"type": "status", "event": "knowledge", "data": {"hits": [{"path": h["path"], "idx": h["idx"]} for h in hits]}}
         if req.mode == "research":
             system += "\n\n" + RESEARCH_PROMPT
-        messages: list[dict] = [{"role": "system", "content": system}] + [_strip(m) for m in _repair_history(history)] + [user_msg]
+        prompt_tools = bool(tools) and bool(getattr(pcfg, "tools_via_prompt", False))
+        if prompt_tools:
+            system += "\n\n" + _tools_prompt(tools)
+            llm_tools = None
+        history_msgs = [_strip(m) for m in _repair_history(history)]
+        messages: list[dict] = [{"role": "system", "content": system}] + (_promptify(history_msgs) if prompt_tools else history_msgs) + [user_msg]
         options = GenerationOptions(
             temperature=assistant.temperature if assistant else None,
             max_tokens=assistant.max_tokens if assistant else None,
@@ -483,12 +577,27 @@ class Engine:
                     attempt += 1
                     produced = False
                     retry_wait = 0.0
+                    switch_prompt = False
+                    scanner = ToolCallScanner() if prompt_tools else None
                     async for ev in provider.stream(model, messages, llm_tools, options):
                         et = ev.get("type")
                         if et == "text_delta":
                             produced = True
+                            if scanner is not None:
+                                shown = scanner.feed(ev["text"])
+                                if shown:
+                                    text_parts.append(shown)
+                                    yield {"type": "text_delta", "text": shown}
+                                while len(scanner.calls) > len(calls):
+                                    c = scanner.calls[len(calls)]
+                                    calls.append(c)
+                                    yield c
+                                continue
                             text_parts.append(ev["text"])
                             yield ev
+                        elif et == "status" and ev.get("event") == "tools_unsupported" and tools and not prompt_tools:
+                            switch_prompt = True  # the server refused tool definitions: describe them in the prompt instead
+                            break
                         elif et == "thinking_delta":
                             produced = True
                             think_parts.append(ev["text"])
@@ -515,6 +624,27 @@ class Engine:
                             yield ev
                         else:
                             yield ev
+                    if switch_prompt:
+                        prompt_tools = True
+                        if pcfg is not None:
+                            pcfg.tools_via_prompt = True  # remembered: next turns go straight to prompt mode
+                            save_config(self.cfg)
+                        llm_tools = None
+                        messages = [{"role": "system", "content": messages[0]["content"] + "\n\n" + _tools_prompt(tools)}] + _promptify(messages[1:])
+                        yield {"type": "status", "event": "tools_via_prompt", "data": {"provider": pid}}
+                        attempt -= 1
+                        continue
+                    if scanner is not None:
+                        tail = scanner.flush()
+                        if tail:
+                            text_parts.append(tail)
+                            yield {"type": "text_delta", "text": tail}
+                        while len(scanner.calls) > len(calls):
+                            c = scanner.calls[len(calls)]
+                            calls.append(c)
+                            yield c
+                        if calls and not had_error:
+                            finish = "tool_calls"
                     if retry_wait:
                         yield {"type": "status", "event": "retry", "data": {"attempt": attempt, "wait": retry_wait, "reason": error_text[:200]}}
                         await asyncio.sleep(retry_wait)
@@ -538,7 +668,7 @@ class Engine:
                     # (an empty assistant message is dropped from provider history by _repair_history)
                     self.store.append_message(req.conversation_id, assistant_msg)
                     yield {"type": "message", "message": assistant_msg}
-                messages.append(_strip(assistant_msg))
+                messages.append(_promptify([_strip(assistant_msg)])[0] if prompt_tools else _strip(assistant_msg))
                 pending = {c["id"]: c for c in calls}
                 if had_error or not calls:
                     # a stream that failed after announcing tool calls: close them, or the next turn's history is invalid
@@ -613,7 +743,7 @@ class Engine:
                         pending.pop(c["id"], None)
                         yield {"type": "tool_result", "id": c["id"], "name": c["name"], "is_error": tool_msg["is_error"], "text": text[:4000], "duration_ms": dur, "decision": decision, "images": tool_msg.get("images", [])}
                         yield {"type": "message", "message": tool_msg}
-                        messages.append(_strip(tool_msg))
+                        messages.append(_promptify([_strip(tool_msg)])[0] if prompt_tools else _strip(tool_msg))
                         # Gemini/Anthropic can take image tool results as a follow-up user message
                         if images:
                             messages.append({"role": "user", "content": [{"type": "text", "text": f"(image returned by {c['name']})"}] + [{"type": "image_url", "image_url": {"url": f"data:{im.get('mime_type', 'image/png')};base64,{im.get('data', '')}"}} for im in images[:2]]})

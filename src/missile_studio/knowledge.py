@@ -188,8 +188,9 @@ class Knowledge:
 
     async def _embed_missing(self, cfg: KnowledgeConfig) -> int:
         done = 0
+        batch = 10  # the smallest common limit (DashScope caps a request at 10 inputs; OpenAI allows far more)
         while True:
-            rows = self.store.kb_chunks_without_vectors(cfg.embeddings_model, limit=64)
+            rows = self.store.kb_chunks_without_vectors(cfg.embeddings_model, limit=batch)
             if not rows:
                 return done
             vecs = await self.embed([r["text"][:6000] for r in rows])
