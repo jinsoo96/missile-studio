@@ -427,3 +427,11 @@ img.mark { display: block; border-radius: 50%; object-fit: cover; box-shadow: 0 
 /* my avatar as a photo (admin sessions); no orange anywhere */
 .avatar.photo { padding: 0; background: none; object-fit: cover; box-shadow: 0 0 0 1px rgba(255, 255, 255, .1); }
 .turn-user .av { background: transparent; }
+
+/* quiet identity: lists carry no icons; an assistant shows a small single-colour glyph (or its own emoji) */
+.glyph { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; flex: none; color: var(--fg-muted); background: var(--bg-subtle); border: 1px solid var(--border); }
+.glyph.sm { width: 22px; height: 22px; }
+:root[data-theme="dark"] .glyph { color: #c4b5fd; background: rgba(139, 124, 255, .08); border-color: rgba(139, 124, 255, .28); }
+.cemoji { margin-right: 6px; }
+.pane-item { padding: 9px 12px; } .pane-item .title { font-weight: 600; } .pane-item .sub { opacity: .8; }
+.asst .i { color: var(--fg-muted); }

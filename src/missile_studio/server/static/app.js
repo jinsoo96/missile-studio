@@ -132,16 +132,12 @@
     set(t) { t = t || 'dark'; document.documentElement.setAttribute('data-theme', t); try { localStorage.setItem('missile_theme', t); } catch {} render(); },
     toggle() { const cur = this.get(); this.set(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]); },
   };
-  // avatars: a custom emoji stays; the stock ones (🤖 🚀 💬) become initials on a gradient tile keyed by the name
+  // the stock emoji (🤖 🚀 💬 🧑) are treated as "no emoji": only an emoji the user chose is ever shown
   const STOCK_EMOJI = new Set(['🤖', '🚀', '💬', '🧑', '']);
-  function avatarEl(name, emoji, size) {
-    if (emoji && !STOCK_EMOJI.has(emoji)) return el('span', { class: 'avatar emoji' + (size ? ' ' + size : '') }, emoji);
-    const n = String(name || '?').trim(); const parts = n.split(/\s+/).filter(Boolean);
-    const initials = (parts.length > 1 ? parts[0][0] + parts[1][0] : n.slice(0, 2)).toUpperCase();
-    const h = hue(n);
-    return el('span', { class: 'avatar' + (size ? ' ' + size : ''), style: `--a1: hsl(${h} 72% 58%); --a2: hsl(${(h + 48) % 360} 72% 46%)`, title: n }, initials);
-  }
   // my messages: the owner's photo for admin sessions, otherwise the account's initials (cool tones, no orange)
+  // assistants: a custom emoji if one was set, otherwise a small single-colour glyph (lists show nothing at all)
+  const assistantGlyph = (a, size) => (a?.emoji && !STOCK_EMOJI.has(a.emoji)) ? el('span', { class: 'avatar emoji' + (size ? ' ' + size : '') }, a.emoji) : el('span', { class: 'glyph' + (size ? ' ' + size : ''), title: a?.name || 'Assistant' }, I('sparkles', size === 'sm' ? 'xs' : 'sm'));
+  const customEmoji = (a) => (a?.emoji && !STOCK_EMOJI.has(a.emoji)) ? el('span', { class: 'cemoji' }, a.emoji) : null;
   const userAvatar = () => (S.me && S.me.role === 'admin') ? el('img', { class: 'avatar photo', src: '/static/brand/avatar.png?v=2', alt: '', title: S.me.username || 'me', draggable: 'false' }) : el('span', { class: 'avatar', style: '--a1:#60a5fa;--a2:#8b5cf6', title: S.me?.username || 'me' }, (S.me?.username || 'me').slice(0, 2).toUpperCase());
   async function loadState() { S.st = await api('/api/state'); }
   async function loadConvs() { S.convs = await api('/api/conversations'); }
@@ -217,8 +213,7 @@
         const g = groupLabel(c.updated_at); if (g !== last) { list.append(el('div', { class: 'pane-group' }, g)); last = g; }
         const a = assistantOf(c.assistant_id); const running = !!S.live[c.id] || c.running;
         list.append(el('div', { class: 'pane-item' + (activePane().convId === c.id ? ' active' : ''), style: openIds.has(c.id) && activePane().convId !== c.id ? 'box-shadow: inset 0 0 0 1px var(--border)' : '', onclick: () => openConv(activePane(), c.id) },
-          el('div', { class: 'em' }, avatarEl(a?.name || 'Chat', a?.emoji)),
-          el('div', { class: 'body' }, el('div', { class: 'title truncate' }, c.title || 'New chat'), el('div', { class: 'sub truncate' }, running ? 'running…' : (shortModel(c.model) || providerOf(c.provider_id)?.label || ''))),
+          el('div', { class: 'body' }, el('div', { class: 'title truncate' }, customEmoji(a), c.title || 'New chat'), el('div', { class: 'sub truncate' }, running ? 'running…' : (shortModel(c.model) || providerOf(c.provider_id)?.label || ''))),
           running ? el('span', { class: 'run', title: 'a turn is running' }) : el('button', { class: 'x', title: 'Delete', onclick: (e) => { e.stopPropagation(); deleteConv(c.id); } }, I('trash', 'xs'))));
       }
       if (!items.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px 10px' }, S.convs.length ? 'No chats match.' : 'No chats yet. Start one.'));
@@ -232,7 +227,7 @@
     pane.append(el('div', { class: 'pane-head' }, el('h2', {}, 'Assistants'), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; render(); } }, I('edit', 'sm'), 'Manage')));
     const list = el('div', { class: 'pane-list' }); pane.append(list);
     const cur = targetOf(activePane());
-    for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: () => setAssistant(activePane(), a.id) }, el('div', { class: 'em' }, avatarEl(a.name, a.emoji)), el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
+    for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: () => setAssistant(activePane(), a.id) }, customEmoji(a) ? el('div', { class: 'em' }, customEmoji(a)) : null, el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
     list.append(el('div', { style: 'padding:10px' }, el('button', { class: 'btn sm', style: 'width:100%', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), 'Add assistant')));
     return pane;
   }
@@ -280,7 +275,7 @@
   function renderPane(pane, idx) {
     const t = targetOf(pane);
     const col = el('div', { class: 'pane-col' + (idx === S.active && S.panes.length > 1 ? ' active-pane' : ''), onmousedown: () => focusPane(idx) });
-    const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px' }, el('span', { class: 'asst' }, el('span', { class: 'em' }, avatarEl(t.assistant?.name || 'Assistant', t.assistant?.emoji, 'sm')), S.panes.length > 1 ? null : (t.assistant?.name || 'Assistant')), I('chevron', 'xs'));
+    const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px', title: 'Assistant: ' + (t.assistant?.name || 'Assistant') }, el('span', { class: 'asst' }, customEmoji(t.assistant), S.panes.length > 1 ? (customEmoji(t.assistant) ? null : I('sparkles', 'sm')) : (t.assistant?.name || 'Assistant')), I('chevron', 'xs'));
     asstBtn.addEventListener('click', () => menu(asstBtn, S.st.assistants.map((a) => ({ label: a.name, sub: a.id, id: a.id, selected: a.id === t.aid })), { onPick: (it) => setAssistant(pane, it.id) }));
     const toolsOn = pane.sel.tools !== false;
     const toolsBtn = t.provider?.kind === 'agentserver' ? el('span', { class: 'chip info', title: 'tools run on the agent server' }, I('cloud', 'xs')) : el('button', { class: 'ico' + (toolsOn ? ' on' : ''), title: toolsOn ? `${S.st.tools.length} local tools on · click to turn off` : 'tools off · click to turn on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, I('wrench', 'sm'));
@@ -315,7 +310,7 @@
   }
   function assistantTurn(pane, modelName) {
     const t = targetOf(pane);
-    const node = el('div', { class: 'turn-ai' }, el('div', { class: 'av' }, avatarEl(t.assistant?.name || 'Assistant', t.assistant?.emoji)));
+    const node = el('div', { class: 'turn-ai' }, el('div', { class: 'av' }, assistantGlyph(t.assistant)));
     const body = el('div', { class: 'body' }); node.append(body);
     body.append(el('div', { class: 'head' }, el('span', { class: 'name' }, t.assistant?.name || 'Assistant'), el('span', { class: 'model' }, shortModel(modelName || t.model))));
     const content = el('div'); body.append(content);
@@ -571,7 +566,7 @@
       const q = inp.value.trim(); const ql = q.toLowerCase(); list.innerHTML = ''; rows = [];
       const addRow = (node, run) => { const i = rows.length; rows.push({ node, run }); node.addEventListener('click', () => { close(); run(); }); node.addEventListener('mousemove', () => { hl = i; paint(); }); list.append(node); };
       const chats = S.convs.filter((c) => !ql || (c.title || '').toLowerCase().includes(ql)).slice(0, ql ? 12 : 6);
-      if (chats.length) { list.append(el('div', { class: 'grp' }, 'Chats')); for (const c of chats) { const a = assistantOf(c.assistant_id); addRow(el('div', { class: 'it' }, avatarEl(a?.name || 'Chat', a?.emoji, 'sm'), el('span', { class: 'truncate' }, c.title || 'New chat'), el('span', { class: 'sub' }, shortModel(c.model))), () => openConv(activePane(), c.id)); } }
+      if (chats.length) { list.append(el('div', { class: 'grp' }, 'Chats')); for (const c of chats) { const a = assistantOf(c.assistant_id); addRow(el('div', { class: 'it' }, customEmoji(a) || I('chat', 'sm'), el('span', { class: 'truncate' }, c.title || 'New chat'), el('span', { class: 'sub' }, shortModel(c.model))), () => openConv(activePane(), c.id)); } }
       const acts = actions.filter((a) => !ql || (a.label + ' ' + (a.sub || '')).toLowerCase().includes(ql));
       if (acts.length) { list.append(el('div', { class: 'grp' }, 'Commands')); for (const a of acts) addRow(el('div', { class: 'it' }, I(a.icon, 'sm'), el('span', {}, a.label), a.sub ? el('span', { class: 'sub' }, a.sub) : null), a.run); }
       if (q) { list.append(el('div', { class: 'grp' }, 'Ask')); addRow(el('div', { class: 'it' }, I('send', 'sm'), el('span', { class: 'truncate' }, `Ask: ${q}`), el('span', { class: 'sub' }, 'Enter')), () => { S.view = 'chat'; render(); send(activePane(), q); }); }
@@ -900,7 +895,7 @@
     const ids = S.st.assistants.map((a) => a.id);
     const sel = S.sel.newAssistant ? null : (ids.includes(S.sel.assistantId) ? S.sel.assistantId : ids[0]);
     list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: () => { S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), 'New assistant')));
-    for (const a of S.st.assistants) list.append(el('div', { class: 'lrow' + (a.id === sel ? ' active' : ''), onclick: () => { S.sel.newAssistant = false; S.sel.assistantId = a.id; render(); } }, el('div', { class: 'em', style: 'background:transparent' }, avatarEl(a.name, a.emoji)), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, a.name), el('div', { class: 'sub truncate' }, a.model ? `${a.provider || 'default'} / ${shortModel(a.model)}` : 'default model')), S.st.default.assistant === a.id ? el('span', { class: 'chip primary' }, 'default') : null));
+    for (const a of S.st.assistants) list.append(el('div', { class: 'lrow' + (a.id === sel ? ' active' : ''), onclick: () => { S.sel.newAssistant = false; S.sel.assistantId = a.id; render(); } }, el('div', { class: 'em', style: 'background:transparent' }, assistantGlyph(a)), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, a.name), el('div', { class: 'sub truncate' }, a.model ? `${a.provider || 'default'} / ${shortModel(a.model)}` : 'default model')), S.st.default.assistant === a.id ? el('span', { class: 'chip primary' }, 'default') : null));
     const a = sel ? assistantOf(sel) : { id: '', name: '', emoji: '🤖', system_prompt: '', provider: '', model: '', tools: 'all', max_iterations: 25 };
     const d = { ...a, tools: Array.isArray(a.tools) ? a.tools.join(', ') : a.tools };
     const card = el('div', { class: 'card' },
