@@ -59,12 +59,14 @@ class FakeProvider(BaseProvider):
     kind = "fake"
     script: list[list[dict]] = []
     seen: list[list[dict]] = []
+    tools_seen: list[list[str]] = []  # tool names offered on each request (None -> [])
 
     async def list_models(self):
         return ["fake-1"]
 
     async def stream(self, model, messages, tools=None, options=None):
         FakeProvider.seen.append([dict(m) for m in messages])  # copy: the engine keeps appending to its list
+        FakeProvider.tools_seen.append([t["name"] for t in (tools or [])])
         step = FakeProvider.script.pop(0)
         for ev in step:
             yield ev
@@ -186,3 +188,32 @@ async def test_hub_proxies_tools(engine: Engine):
         r = await c.call_tool("local__write_file", {"path": "x.txt", "content": "y"})
         assert r.is_error and "requires approval" in r.content[0].text
     await engine.stop()
+
+
+async def test_call_waits_for_a_reconnecting_server(tmp_path, monkeypatch):
+    """A tool called while its server is reconnecting (a restarted MCP server) waits for it instead of answering
+    'unknown tool'; a server that stays down gets a clear try-again message after the wait."""
+    import asyncio
+
+    monkeypatch.setenv("MISSILE_HOME", str(tmp_path))
+    mgr = McpManager({"echo": echo_cfg()})
+    await mgr.start()
+    await mgr.wait_ready(timeout=60)
+    st = mgr.servers["echo"]
+    session = st.session
+    st.status, st.session, st.error = "failed", None, "ping failed"
+    assert mgr.find_tool("echo__echo") is None  # the catalog hides tools of a server that is not connected
+
+    async def back():
+        await asyncio.sleep(0.6)
+        st.status, st.session, st.error = "connected", session, ""
+
+    task = asyncio.create_task(back())
+    r = await mgr.call_tool("echo__echo", {"text": "hi"}, reconnect_wait=5)
+    await task
+    assert not r["is_error"] and r["text"] == "hi"
+    st.status, st.session, st.error = "failed", None, "ping failed"
+    r = await mgr.call_tool("echo__echo", {"text": "hi"}, reconnect_wait=0.5)
+    assert r["is_error"] and "try again" in r["text"] and "ping failed" in r["text"] and "unknown" not in r["text"]
+    st.status, st.session, st.error = "connected", session, ""
+    await mgr.configure({})

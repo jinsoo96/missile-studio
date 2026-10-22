@@ -71,6 +71,66 @@ def _tools_prompt(tools: list) -> str:
     )
 
 
+# ---------------------------------------------------------------- tool catalog (many tools, small contexts)
+LOAD_TOOLS = ToolInfo(
+    server="local",
+    name="load_tools",
+    full_name=f"local{SEP}load_tools",
+    description="Load the full definition (description + argument schema) of tools from the catalog so you can call them. "
+    "Give exact catalog names comma-separated in names, or describe what you need in query. Loaded tools stay available for the rest of this conversation.",
+    input_schema={"type": "object", "properties": {"names": {"type": "string", "description": "comma-separated tool names from the catalog, e.g. server__tool"}, "query": {"type": "string", "description": "what you want to do, when unsure of the name"}, "limit": {"type": "integer", "default": 8}}},
+    read_only=True,
+)
+_WORD = re.compile(r"[a-z0-9]+|[가-힣]+", re.I)
+
+
+def _short(text: str, n: int = 90) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+
+
+def _tools_line(tools: list) -> str:
+    names = ", ".join(t.full_name for t in tools[:80])
+    return (
+        f"Tools available ({len(tools)}): {names}. Some tools require human approval before they run; "
+        "if a tool result says it was denied, do not retry it, explain instead."
+    )
+
+
+def _catalog_prompt(tools: list, loaded: set) -> str:
+    """One line per connected tool, grouped by server: enough to pick, not the schemas."""
+    by_server: dict[str, list] = {}
+    for t in tools:
+        by_server.setdefault(t.server, []).append(t)
+    lines = []
+    for server, ts in by_server.items():
+        lines.append(f"[{server}]")
+        for t in ts:
+            lines.append(f"- {t.full_name}: {_short(t.description)}" + (" (loaded)" if t.full_name in loaded else ""))
+    return (
+        f"Tool catalog: {len(tools)} tools are connected, but only the loaded ones are fully defined. Before using any other "
+        f"tool, call {LOAD_TOOLS.full_name} with its exact name(s) (names=\"a,b\") or a short query; it returns the argument "
+        "schemas and the tools become callable. Load only what the task needs.\n" + "\n".join(lines)
+    )
+
+
+def _score_tool(t, query: str) -> float:
+    words = [w.lower() for w in _WORD.findall(query or "")]
+    if not words:
+        return 0.0
+    name = t.full_name.lower()
+    desc = (t.description or "").lower()
+    s = 0.0
+    for w in words:
+        if w in name:
+            s += 3.0
+        elif w in desc:
+            s += 1.0
+        elif len(w) >= 3 and any(w[i : i + 2] in desc for i in range(len(w) - 1)):  # Korean particles: 컷을 → 컷
+            s += 0.3
+    return s
+
+
 def _promptify(messages: list[dict]) -> list[dict]:
     """History as plain text for a server that knows no tool roles: calls become <tool_call> blocks in the assistant
     text, results become user messages wrapped in <tool_response>."""
@@ -398,12 +458,60 @@ class Engine:
         )
         parts.append(env)
         if tools:
-            names = ", ".join(t.full_name for t in tools[:80])
-            parts.append(
-                f"Tools available ({len(tools)}): {names}. Some tools require human approval before they run; "
-                "if a tool result says it was denied, do not retry it, explain instead."
-            )
+            parts.append(_tools_line(tools))
         return "\n\n".join(parts)
+
+    # ------------------------------------------------------------ tool catalog
+    def _catalog_active(self, tools: list) -> bool:
+        cc = self.cfg.tool_catalog
+        if cc.mode == "off" or not tools:
+            return False
+        if cc.mode == "on":
+            return True
+        return len(tools) > max(1, cc.threshold)
+
+    def _preloaded(self, tools: list, history: list[dict]) -> set[str]:
+        """Tools fully defined from the start: the always-list, plus whatever this conversation already used or loaded."""
+        names = {t.full_name for t in tools}
+        loaded: set[str] = set()
+        for pat in self.cfg.tool_catalog.always:
+            for t in tools:
+                if t.full_name == pat or t.server == pat or t.name == pat or (pat.endswith("*") and t.full_name.startswith(pat[:-1])):
+                    loaded.add(t.full_name)
+        for m in history:
+            if m.get("role") == "assistant":
+                for c in m.get("tool_calls") or []:
+                    if c.get("name") in names:
+                        loaded.add(c["name"])
+            elif m.get("role") == "tool":
+                for n in m.get("loaded") or []:
+                    if n in names:
+                        loaded.add(n)
+        return loaded
+
+    def _load_tools(self, tools: list, loaded: set, args: dict) -> dict:
+        wanted = args.get("names") or []
+        if isinstance(wanted, str):
+            wanted = [s.strip() for s in re.split(r"[,\s]+", wanted) if s.strip()]
+        picked: list = []
+        missing: list[str] = []
+        for w in wanted:
+            hit = next((t for t in tools if t.full_name == w), None) or next((t for t in tools if t.name == w or t.full_name.endswith(SEP + w)), None)
+            if hit is None:
+                missing.append(w)
+            elif hit not in picked:
+                picked.append(hit)
+        query = str(args.get("query") or "").strip()
+        if query:
+            limit = max(1, min(int(args.get("limit") or 8), 20))
+            ranked = sorted(((_score_tool(t, query), t) for t in tools if t not in picked), key=lambda st: -st[0])
+            picked += [t for s, t in ranked[:limit] if s > 0]
+        for t in picked:
+            loaded.add(t.full_name)
+        body = {"loaded": [t.as_llm_tool() for t in picked], "not_found": missing, "now_available": sorted(loaded)}
+        if not picked:
+            body["hint"] = "no tool matched; use exact names from the catalog or different words"
+        return {"text": json.dumps(body, ensure_ascii=False), "is_error": not picked, "content": [], "loaded": [t.full_name for t in picked]}
 
     # ------------------------------------------------------------ compaction (long threads)
     def _apply_summary(self, conv: dict, history: list[dict]) -> tuple[list[dict], str]:
@@ -503,10 +611,21 @@ class Engine:
         self.store.update_conversation(req.conversation_id, provider_id=pid, model=model, assistant_id=assistant.id if assistant else "default")
 
         tools = self.tools_for(assistant, req.tools_override) if pcfg and pcfg.kind != "agentserver" else []
-        llm_tools = [t.as_llm_tool() for t in tools] or None
         tool_index = {t.full_name: t for t in tools}
-
         history = self.store.get_messages(req.conversation_id)
+        # many tools: send a one-line catalog and only the loaded tools' schemas (see ToolCatalogConfig)
+        catalog_on = self._catalog_active(tools)
+        loaded: set[str] = self._preloaded(tools, history) if catalog_on else set()
+
+        def active_tools() -> list:
+            return ([LOAD_TOOLS] + [t for t in tools if t.full_name in loaded]) if catalog_on else tools
+
+        tools_active = active_tools()
+        llm_tools = [t.as_llm_tool() for t in tools_active] or None
+        if catalog_on:
+            tool_index[LOAD_TOOLS.full_name] = LOAD_TOOLS
+            yield {"type": "status", "event": "tool_catalog", "data": {"total": len(tools), "loaded": sorted(loaded)}}
+
         history, summary = self._apply_summary(conv, history)
         budget = int((pcfg.context_tokens() if pcfg else 128_000) * 0.6)
         if _estimate_tokens(history) > budget:
@@ -519,7 +638,7 @@ class Engine:
         if not conv.get("title"):
             self.store.update_conversation(req.conversation_id, title=req.user_text.strip().splitlines()[0][:60] if req.user_text.strip() else "New chat")
 
-        system = self._system_prompt(assistant, tools)
+        system = self._system_prompt(assistant, [])
         style = self.cfg.style(req.style_id or conv.get("style_id") or "")
         if style and style.prompt:
             system += "\n\nWriting style: " + style.prompt
@@ -537,11 +656,23 @@ class Engine:
         if req.mode == "research":
             system += "\n\n" + RESEARCH_PROMPT
         prompt_tools = bool(tools) and bool(getattr(pcfg, "tools_via_prompt", False))
+        system_base = system
+
+        def compose_system() -> str:
+            # rebuilt whenever the active tool set changes (catalog loads) or the provider switches to prompt tools
+            s = system_base
+            if tools_active:
+                s += "\n\n" + _tools_line(tools_active)
+            if catalog_on:
+                s += "\n\n" + _catalog_prompt(tools, loaded)
+            if prompt_tools:
+                s += "\n\n" + _tools_prompt(tools_active)
+            return s
+
         if prompt_tools:
-            system += "\n\n" + _tools_prompt(tools)
             llm_tools = None
         history_msgs = [_strip(m) for m in _repair_history(history)]
-        messages: list[dict] = [{"role": "system", "content": system}] + (_promptify(history_msgs) if prompt_tools else history_msgs) + [user_msg]
+        messages: list[dict] = [{"role": "system", "content": compose_system()}] + (_promptify(history_msgs) if prompt_tools else history_msgs) + [user_msg]
         options = GenerationOptions(
             temperature=assistant.temperature if assistant else None,
             max_tokens=assistant.max_tokens if assistant else None,
@@ -630,7 +761,7 @@ class Engine:
                             pcfg.tools_via_prompt = True  # remembered: next turns go straight to prompt mode
                             save_config(self.cfg)
                         llm_tools = None
-                        messages = [{"role": "system", "content": messages[0]["content"] + "\n\n" + _tools_prompt(tools)}] + _promptify(messages[1:])
+                        messages = [{"role": "system", "content": compose_system()}] + _promptify(messages[1:])
                         yield {"type": "status", "event": "tools_via_prompt", "data": {"provider": pid}}
                         attempt -= 1
                         continue
@@ -679,12 +810,18 @@ class Engine:
                 # decide every call first (approvals are interactive, so they stay sequential), then run the allowed
                 # ones concurrently and hand results back as they finish
                 plan: list[tuple[dict, Any, str]] = []
+                loaded_before = set(loaded)
                 for c in calls:
                     tool = tool_index.get(c["name"]) or self.mcp.find_tool(c["name"])
+                    if tool is None and SEP not in c["name"]:  # a bare name: accept it when exactly one tool has it
+                        same = [t for t in tools if t.name == c["name"]]
+                        tool = same[0] if len(same) == 1 else None
                     args = c.get("arguments") or {}
                     if tool is None:
                         plan.append((c, None, "block"))
                         continue
+                    if catalog_on and tool is not LOAD_TOOLS and tool.full_name not in loaded:
+                        loaded.add(tool.full_name)  # called straight from the catalog: fine, and defined from now on
                     decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous)
                     if decision == "ask":
                         yield {"type": "approval_required", "id": c["id"], "name": c["name"], "arguments": args, "reason": reason}
@@ -708,7 +845,10 @@ class Engine:
                         result = {"text": f"unknown tool {c['name']}", "is_error": True, "content": []}
                     elif decision == "allow":
                         try:
-                            result = await self.call_tool(tool, c.get("arguments") or {})
+                            if tool is LOAD_TOOLS:
+                                result = self._load_tools(tools, loaded, c.get("arguments") or {})
+                            else:
+                                result = await self.call_tool(tool, c.get("arguments") or {})
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
@@ -736,6 +876,8 @@ class Engine:
                         if len(text) > 60000:
                             text = text[:50000] + f"\n... [truncated {len(text) - 50000} chars]"
                         tool_msg = {"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": text, "is_error": bool(result.get("is_error")), "decision": decision, "duration_ms": dur}
+                        if result.get("loaded"):
+                            tool_msg["loaded"] = list(result["loaded"])  # remembered: the next turn starts with these defined
                         images = [p for p in result.get("content", []) if p.get("type") == "image"]
                         if images:
                             tool_msg["images"] = images[:4]
@@ -747,6 +889,12 @@ class Engine:
                         # Gemini/Anthropic can take image tool results as a follow-up user message
                         if images:
                             messages.append({"role": "user", "content": [{"type": "text", "text": f"(image returned by {c['name']})"}] + [{"type": "image_url", "image_url": {"url": f"data:{im.get('mime_type', 'image/png')};base64,{im.get('data', '')}"}} for im in images[:2]]})
+                    if catalog_on and loaded != loaded_before:
+                        # the model loaded tools (or called catalogued ones): define them for the next request
+                        tools_active = active_tools()
+                        llm_tools = None if prompt_tools else [t.as_llm_tool() for t in tools_active]
+                        messages[0] = {"role": "system", "content": compose_system()}
+                        yield {"type": "status", "event": "tools_loaded", "data": {"names": sorted(loaded - loaded_before)}}
                 except asyncio.CancelledError:
                     for t in tool_tasks:
                         t.cancel()

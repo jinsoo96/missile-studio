@@ -69,6 +69,9 @@ class ToolInfo:
         }
 
 
+RECONNECT_WAIT = 20.0  # seconds a tool call waits for a server that is reconnecting (restarted, network blip)
+
+
 @dataclass
 class ServerState:
     name: str
@@ -339,22 +342,42 @@ class McpManager:
     def status(self) -> list[dict]:
         return [st.as_dict() for st in self.servers.values()]
 
-    async def call_tool(self, full_name: str, arguments: dict, timeout: Optional[float] = None) -> dict:
-        """Call a namespaced tool. Returns {"content": [...], "is_error": bool, "text": str}."""
+    async def _await_reconnect(self, st: ServerState, wait: float) -> None:
+        """A server that dropped (restarted, network blip) is usually back within seconds: skip the backoff and wait."""
+        if st.status in ("disabled", "stopped") or wait <= 0:
+            return
+        st.reconnect_now.set()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait
+        while loop.time() < deadline and not (st.status == "connected" and st.session is not None):
+            await asyncio.sleep(0.25)
+
+    async def call_tool(self, full_name: str, arguments: dict, timeout: Optional[float] = None, reconnect_wait: float = RECONNECT_WAIT) -> dict:
+        """Call a namespaced tool. Returns {"content": [...], "is_error": bool, "text": str}.
+        A server that is reconnecting is waited for (up to ``reconnect_wait``) instead of reporting the tool as unknown."""
         info = self.find_tool(full_name)
+        owner: Optional[ServerState] = None
+        if info is None and SEP in full_name:
+            srv, raw = full_name.split(SEP, 1)
+            owner = next((s for s in self.servers.values() if safe_server_name(s.name) == srv), None)
+            if owner is not None:
+                if owner.status != "connected":
+                    await self._await_reconnect(owner, reconnect_wait)
+                if owner.status == "connected":
+                    # the catalog may be stale (a restarted server, a tool added since): call it by its raw name
+                    info = next((t for t in owner.tools if t.name == raw), None) or ToolInfo(server=owner.name, name=raw, full_name=full_name, description="", input_schema={})
         if info is None:
-            # maybe the server is connected but catalog stale, try to split
-            if SEP in full_name:
-                srv, raw = full_name.split(SEP, 1)
-                for st in self.servers.values():
-                    if safe_server_name(st.name) == srv and st.status == "connected":
-                        info = ToolInfo(server=st.name, name=raw, full_name=full_name, description="", input_schema={})
-                        break
-        if info is None:
-            return {"content": [{"type": "text", "text": f"unknown tool {full_name}"}], "is_error": True, "text": f"unknown tool {full_name}"}
+            if owner is not None:
+                msg = f"server {owner.name} is {owner.status}" + (f" ({owner.error})" if owner.error else "") + f"; {full_name} will work again once it reconnects, try again in a moment"
+            else:
+                msg = f"unknown tool {full_name}"
+            return {"content": [{"type": "text", "text": msg}], "is_error": True, "text": msg}
         st = self.servers[info.server]
         if st.session is None or st.status != "connected":
-            return {"content": [{"type": "text", "text": f"server {info.server} is {st.status}: {st.error}"}], "is_error": True, "text": f"server {info.server} not connected"}
+            await self._await_reconnect(st, reconnect_wait)
+        if st.session is None or st.status != "connected":
+            msg = f"server {info.server} is {st.status}" + (f" ({st.error})" if st.error else "") + "; try again in a moment"
+            return {"content": [{"type": "text", "text": msg}], "is_error": True, "text": msg}
         try:
             res = await asyncio.wait_for(
                 st.session.call_tool(info.name, arguments or {}, read_timeout_seconds=timeout or self.call_timeout),

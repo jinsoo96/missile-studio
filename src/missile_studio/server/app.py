@@ -335,6 +335,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "tools": [t.as_dict() for t in engine.all_tools()],
             "policy": cfg.tool_policy.model_dump(),
             "builtin_tools": _builtin_view(cfg),
+            "tool_catalog": cfg.tool_catalog.model_dump(),
             "memory": cfg.memory.model_dump(),
             "knowledge": {**cfg.knowledge.model_dump(), **(engine.knowledge.status() if engine.knowledge else {})},
             "server": {"host": cfg.server.host, "port": cfg.server.port, "auth_required": bool(app.state.token)},
@@ -594,6 +595,24 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     @app.delete("/api/memory/{mid}", dependencies=[user_dep])
     async def memory_delete(mid: str):
         return {"ok": store.delete_memory(mid)}
+
+    class ToolCatalogIn(BaseModel):
+        mode: str = "auto"
+        threshold: int = 24
+        always: Any = None  # list or comma-separated string
+
+    @app.put("/api/tool-catalog", dependencies=[admin_dep])
+    async def tool_catalog(body: ToolCatalogIn):
+        cc = engine.cfg.tool_catalog
+        if body.mode in ("auto", "on", "off"):
+            cc.mode = body.mode
+        cc.threshold = max(1, min(int(body.threshold or 24), 500))
+        if isinstance(body.always, str):
+            cc.always = [s.strip() for s in body.always.split(",") if s.strip()]
+        elif isinstance(body.always, list):
+            cc.always = [str(s).strip() for s in body.always if str(s).strip()]
+        engine.save()
+        return cc.model_dump()
 
     @app.put("/api/memory-settings", dependencies=[admin_dep])  # not under /api/memory/{mid}
     async def memory_settings(body: MemorySettingsIn):

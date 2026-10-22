@@ -24,6 +24,8 @@
   const healthOf = (p) => (p && p.health) || { state: 'unknown', error: '' };
   const hdot = (p) => { const h = healthOf(p); return el('span', { class: 'hdot ' + h.state, title: `${p?.label || p?.id || ''}: ${HEALTH_LABEL[h.state] || h.state}${h.error ? ' · ' + h.error : ''}${h.ms ? ' · ' + h.ms + 'ms' : ''}` }); };
   const unusable = (p) => ['down', 'nokey'].includes(healthOf(p).state);
+  // tool catalog: above the threshold the model is sent one line per tool and loads the ones it needs
+  const catalogOn = () => { const c = (S.st && S.st.tool_catalog) || {}; return c.mode === 'on' || (c.mode !== 'off' && (S.st?.tools?.length || 0) > (c.threshold || 24)); };
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const hl = (snippet) => esc(snippet).replace(/\[([^\]]{1,80})\]/g, '<mark>$1</mark>');  // the search API marks hits with [ ]
   const MAX_PANES = 3;
@@ -468,7 +470,7 @@
     function renderPills() {
       pills.innerHTML = '';
       const toolsOn = pane.sel.tools !== false;
-      if (t.provider?.kind !== 'agentserver') pills.append(el('span', { class: 'chip' + (toolsOn ? ' primary' : ''), title: toolsOn ? 'local tools on' : 'local tools off' }, I('wrench', 'xs'), toolsOn ? `${S.st.tools.length} tools` : 'tools off', el('button', { title: toolsOn ? 'turn tools off' : 'turn tools on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, toolsOn ? '✕' : '＋')));
+      if (t.provider?.kind !== 'agentserver') pills.append(el('span', { class: 'chip' + (toolsOn ? ' primary' : ''), title: toolsOn ? (catalogOn() ? 'tools on · the model gets a catalog and loads what it needs' : 'local tools on') : 'local tools off' }, I('wrench', 'xs'), toolsOn ? `${S.st.tools.length} tools${catalogOn() ? ' · on demand' : ''}` : 'tools off', el('button', { title: toolsOn ? 'turn tools off' : 'turn tools on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, toolsOn ? '✕' : '＋')));
       if (pane.sel.thinking) pills.append(el('span', { class: 'chip info' }, I('brain', 'xs'), THINK_LABEL[pane.sel.thinking], el('button', { title: 'back to provider default', onclick: () => { pane.sel.thinking = ''; render(); } }, '✕')));
       if (pane.sel.research) pills.append(el('span', { class: 'chip info' }, I('globe', 'xs'), 'research', el('button', { title: 'normal mode', onclick: () => { pane.sel.research = false; render(); } }, '✕')));
       if (pane.sel.knowledge) pills.append(el('span', { class: 'chip' }, I('box', 'xs'), 'knowledge', el('button', { title: 'no knowledge retrieval', onclick: () => { pane.sel.knowledge = false; render(); } }, '✕')));
@@ -582,6 +584,8 @@
           if (ev.event === 'retry') status(`provider busy, retrying (attempt ${d.attempt + 1}/3)…`, true);
           else if (ev.event === 'compacting') status('long thread: compacting the earlier part into a summary…', true);
           else if (ev.event === 'compacted') status(`history compacted · ${d.kept} recent messages kept verbatim`);
+          else if (ev.event === 'tool_catalog') status(`tool catalog: ${(d.loaded || []).length} of ${d.total} tools defined · the model loads the rest as needed`);
+          else if (ev.event === 'tools_loaded') status(`loaded tools: ${(d.names || []).map((n) => n.split('__').pop()).join(', ')}`);
           else if (ev.event === 'knowledge') status(`${(d.hits || []).length} knowledge excerpts in context: ${(d.hits || []).map((h) => baseName(h.path)).slice(0, 4).join(', ')}`);
           else if (ev.event === 'max_iterations') status('stopped: max iterations reached', true);
           else if (ev.event === 'tools_unsupported') status('this model server cannot take tool definitions: switching to prompt-based tool calls', true);
@@ -950,9 +954,14 @@
     const wsKey = el('input', { class: 'input', type: 'password', placeholder: wsc.has_key ? 'saved · type to replace' : 'API key (tavily / brave / serper)', oninput: (e) => { wsc.api_key = e.target.value; } });
     const wsEnv = el('input', { class: 'input', value: wsc.api_key_env || '', placeholder: 'or an env var name, e.g. TAVILY_API_KEY', oninput: (e) => { wsc.api_key_env = e.target.value.trim(); } });
     const wsUrl = el('input', { class: 'input', value: wsc.url || '', placeholder: 'https://searx.example.com (searxng only)', oninput: (e) => { wsc.url = e.target.value.trim(); } });
+    const tc = { ...(S.st.tool_catalog || { mode: 'auto', threshold: 24, always: [] }) };
+    const tcMode = el('select', { class: 'select' }, ...[['auto', 'auto · above the threshold'], ['on', 'always'], ['off', 'off · send every schema']].map(([v, l]) => el('option', { value: v, selected: v === tc.mode }, l)));
+    const tcThr = el('input', { class: 'input', type: 'number', min: 1, max: 500, value: tc.threshold || 24 });
+    const tcAlways = el('input', { class: 'input', value: (tc.always || []).join(', '), placeholder: 'e.g. local__now, webtoon-studio__status, fs__*' });
     polCard.append(el('h3', {}, 'Defaults'), el('div', { class: 'grid2' }, field('Tools that write or run things', selDef, 'ask = pause and show an approval card'), field('Read-only tools', selRO)), el('div', { class: 'sect' }, 'Local tools'), field('Workspace folder', ws, 'Local file and shell tools cannot leave this folder.'), el('div', { class: 'row' }, ...Object.keys(sw).map((k) => el('span', { class: 'row' }, switchEl(sw[k], (v) => { sw[k] = v; }), k === 'web' ? 'web fetch + search' : k))),
       el('div', { class: 'sect' }, 'Web search'), el('div', { class: 'muted tiny' }, 'The web_search tool (and Research mode) use one search API. DuckDuckGo works without a key; the others are faster and cleaner.'), el('div', { class: 'grid2' }, field('Provider', wsProv), field('API key', wsKey)), el('div', { class: 'grid2' }, field('Key from environment', wsEnv), field('SearXNG URL', wsUrl)),
-      el('div', {}, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/policy', { method: 'PUT', body: { ...pol, default: selDef.value, read_only_default: selRO.value } }); const body = { ...sw, workspace: ws.value.trim(), web_search: { provider: wsc.provider, api_key: wsc.api_key || (wsc.has_key ? '…' : ''), api_key_env: wsc.api_key_env || '', url: wsc.url || '' } }; await api('/api/builtin-tools', { method: 'PUT', body }); toast('saved'); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, 'Save')));
+      el('div', { class: 'sect' }, 'Tool catalog'), el('div', { class: 'muted tiny' }, `With many tools connected (${S.st.tools.length} now), the model gets a one-line catalog instead of every schema and loads the tools it needs with load_tools. Keeps small-context models usable; loaded tools stay loaded for the conversation.`), el('div', { class: 'grid2' }, field('Mode', tcMode, 'auto = catalog when more tools than the threshold'), field('Threshold (tools)', tcThr)), field('Always defined', tcAlways, 'comma-separated tool names, server names or server__* patterns that skip the catalog'),
+      el('div', {}, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/policy', { method: 'PUT', body: { ...pol, default: selDef.value, read_only_default: selRO.value } }); const body = { ...sw, workspace: ws.value.trim(), web_search: { provider: wsc.provider, api_key: wsc.api_key || (wsc.has_key ? '…' : ''), api_key_env: wsc.api_key_env || '', url: wsc.url || '' } }; await api('/api/builtin-tools', { method: 'PUT', body }); await api('/api/tool-catalog', { method: 'PUT', body: { mode: tcMode.value, threshold: parseInt(tcThr.value, 10) || 24, always: tcAlways.value } }); toast('saved'); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, 'Save')));
     const tb = el('tbody');
     for (const t of S.st.tools) {
       const sel = el('select', { class: 'select', onchange: async (e) => { const rules = { ...pol.rules }; if (e.target.value) rules[t.full_name] = e.target.value; else delete rules[t.full_name]; await api('/api/policy', { method: 'PUT', body: { ...pol, rules } }); pol.rules = rules; toast('rule saved'); } }, el('option', { value: '' }, 'default'), ...['allow', 'ask', 'block'].map((v) => el('option', { value: v, selected: pol.rules[t.full_name] === v }, v)));

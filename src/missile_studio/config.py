@@ -158,6 +158,15 @@ class MemoryConfig(BaseModel):
     recall_k: int = 5
 
 
+class ToolCatalogConfig(BaseModel):
+    """With many tools connected, the model is sent a one-line catalog instead of every schema and loads the
+    tools it needs (local__load_tools). Keeps small-context servers usable with dozens of tools."""
+
+    mode: str = "auto"  # auto (above the threshold) | on | off
+    threshold: int = 24
+    always: list[str] = Field(default_factory=list)  # tool names, server names or server__* that are always fully defined
+
+
 class BuiltinTools(BaseModel):
     shell: bool = True
     filesystem: bool = True
@@ -219,6 +228,7 @@ class Config(BaseModel):
     builtin_tools: BuiltinTools = Field(default_factory=BuiltinTools)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    tool_catalog: ToolCatalogConfig = Field(default_factory=ToolCatalogConfig)
     presets: list[ModelPreset] = Field(default_factory=list)
     styles: list[StyleConfig] = Field(default_factory=list)
 
