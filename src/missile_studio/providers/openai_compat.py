@@ -128,6 +128,7 @@ class OpenAICompatProvider(BaseProvider):
         url = f"{self._base()}/chat/completions"
         pending: dict[int, dict[str, Any]] = {}
         finish: Optional[str] = None
+        stop_reason: Any = None  # vLLM: the token id or string that ended generation (None = end-of-sequence)
         emitted_calls = False
         got_usage = False
         try:
@@ -149,6 +150,7 @@ class OpenAICompatProvider(BaseProvider):
                     async for ev in self._consume(resp, pending):
                         if ev["type"] == "done":
                             finish = ev["finish_reason"]
+                            stop_reason = ev.get("stop_reason", stop_reason)
                             continue
                         if ev["type"] == "usage":
                             got_usage = True
@@ -164,9 +166,9 @@ class OpenAICompatProvider(BaseProvider):
 
             yield {"type": "tool_call", "id": c.get("id") or f"call_{idx}", "name": c.get("name", ""), "arguments": _json_loads_lenient(c.get("arguments", ""))}
             emitted_calls = True
-        if not got_usage:
-            pass
-        yield {"type": "done", "finish_reason": "tool_calls" if emitted_calls else (finish or "stop")}
+        # finish_reason is what the engine acts on; server_finish / stop_reason are what the server actually said
+        # (kept on the message so a cut-short answer shows why it ended)
+        yield {"type": "done", "finish_reason": "tool_calls" if emitted_calls else (finish or "stop"), "server_finish": finish, "stop_reason": stop_reason}
 
     async def _consume(self, resp, pending: dict[int, dict[str, Any]]) -> AsyncIterator[dict]:
         async for _event, data in read_sse(resp):
@@ -205,4 +207,4 @@ class OpenAICompatProvider(BaseProvider):
                         slot["arguments"] += fn["arguments"]
                 fr = choice.get("finish_reason")
                 if fr:
-                    yield {"type": "done", "finish_reason": fr}
+                    yield {"type": "done", "finish_reason": fr, "stop_reason": choice.get("stop_reason")}

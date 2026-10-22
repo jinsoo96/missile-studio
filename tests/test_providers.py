@@ -58,7 +58,7 @@ async def test_openai_text_and_tool_calls_stream():
     assert any(e["type"] == "thinking_delta" for e in evs)
     calls = [e for e in evs if e["type"] == "tool_call"]
     assert calls == [{"type": "tool_call", "id": "call_1", "name": "echo__add", "arguments": {"a": 1, "b": 2}}]
-    assert evs[-1] == {"type": "done", "finish_reason": "tool_calls"}
+    assert evs[-1] == {"type": "done", "finish_reason": "tool_calls", "server_finish": "tool_calls", "stop_reason": None}
     assert any(e["type"] == "usage" and e["input_tokens"] == 10 for e in evs)
     assert seen["body"]["enable_thinking"] is False
     assert seen["body"]["tools"][0]["function"]["name"] == "echo__add"

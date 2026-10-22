@@ -459,3 +459,5 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 
 /* a tool call the model wrote as text that did not run: a quiet line in the thread, not a user bubble */
 .note-line { display: flex; align-items: center; gap: 6px; margin: 4px 0 4px 44px; font-size: 12px; color: var(--fg-3); }
+/* an answer that did not end normally (output limit, other server stop): a small flag in the footer */
+.meta .finish-flag { color: var(--warning); }

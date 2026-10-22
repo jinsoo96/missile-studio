@@ -421,7 +421,7 @@
       }
       if (m.role === 'assistant') {
         const { node, content, body } = assistantTurn(pane, m.meta?.model);
-        let totalMs = 0, usage = null, lastText = ''; const firstId = m.id;
+        let totalMs = 0, usage = null, lastText = '', finishInfo = null; const firstId = m.id;
         while (i < pane.messages.length && pane.messages[i].role !== 'user') {
           const mm = pane.messages[i];
           if (mm.role === 'assistant') {
@@ -429,11 +429,11 @@
             if (mm.content) { const mdEl = el('div', { class: 'md', html: md(mm.content) }); artifactize(mdEl, mm.id, pane.convId); content.append(mdEl); lastText = mm.content; }
             if (mm.meta?.error_text) { const ep = providerOf(mm.meta.provider || pane.conv?.provider_id || ''); const ws = ep?.wake_server; const wj = ws && (S.st.wake || []).find((j) => j.server === ws); content.append(el('div', { class: 'error-line' }, mm.meta.error_text, /401|credential|api key|unauthorized/i.test(mm.meta.error_text) ? el('button', { class: 'btn sm', style: 'margin-left:10px', onclick: () => { S.view = 'settings'; S.settingsPage = 'providers'; S.sel.providerId = pane.conv?.provider_id || ''; render(); } }, 'Open provider settings') : null, ws && unusable(ep) ? (wakeActive(wj) ? el('span', { class: 'chip info', style: 'margin-left:10px' }, `waking · ${wakeLabel(wj)}`) : el('button', { class: 'btn sm primary', style: 'margin-left:10px', title: `run ${ws}'s wake command, then reconnect`, onclick: () => wakeServer(ws) }, I('refresh', 'sm'), `Wake ${ws}`)) : null)); }
             for (const c of mm.tool_calls || []) content.append(toolCard(c, toolResults[c.id], !!live));
-            if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage;
+            if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage; if (mm.meta?.finish) { finishInfo = { finish: mm.meta.finish, stop_reason: mm.meta.stop_reason, out: mm.meta.usage?.output_tokens }; }
           }
           i++;
         }
-        const meta = el('div', { class: 'meta' }); if (totalMs) meta.append(el('span', {}, `Processed · ${fmtMs(totalMs)}`)); if (usage) meta.append(el('span', {}, `${usage.input_tokens || 0}↑ ${usage.output_tokens || 0}↓ tokens`));
+        const meta = el('div', { class: 'meta' }); if (totalMs) meta.append(el('span', {}, `Processed · ${fmtMs(totalMs)}`)); if (usage) meta.append(el('span', { title: finishInfo ? finishTitle(finishInfo) : '' }, `${usage.input_tokens || 0}↑ ${usage.output_tokens || 0}↓ tokens`)); if (finishInfo && !NORMAL_FINISH.has(finishInfo.finish)) meta.append(el('span', { class: 'finish-flag', title: finishTitle(finishInfo) }, `ended: ${finishInfo.finish}`));
         const nav = branchNav(pane, firstId); if (nav) meta.append(nav);
         const acts = el('span', { class: 'actions' });
         if (lastText) { const lt = lastText; acts.append(el('button', { class: 'btn quiet icon sm', title: 'Copy answer', onclick: () => navigator.clipboard.writeText(lt).then(() => toast('copied')) }, I('copy', 'xs')), el('button', { class: 'btn quiet icon sm', title: 'Download answer as Markdown (.md)', onclick: () => saveBlob(((pane.conv?.title || 'answer').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 50) || 'answer') + '.md', lt, 'text/markdown;charset=utf-8') }, I('download', 'xs'))); }
@@ -612,6 +612,7 @@
           else if (ev.event === 'compacting') status('long thread: compacting the earlier part into a summary…', true);
           else if (ev.event === 'compacted') status(`history compacted · ${d.kept} recent messages kept verbatim`);
           else if (ev.event === 'tool_catalog') status(`tool catalog: ${(d.loaded || []).length} of ${d.total} tools defined · the model loads the rest as needed`);
+          else if (ev.event === 'answer_cut_off') status(`answer stopped mid-sentence (${d.finish || 'stop'}${d.output_tokens != null ? ', ' + d.output_tokens + ' tokens' : ''})` + (d.retry ? ' · asked the model to continue' : ''), true);
           else if (ev.event === 'tool_call_not_run') status(noteText(d) + (d.retry ? ' · asked the model to send it again' : ' · not retried again'), true);
           else if (ev.event === 'tools_loaded') status(`loaded tools: ${(d.names || []).map((n) => n.split('__').pop()).join(', ')}`);
           else if (ev.event === 'knowledge') status(`${(d.hits || []).length} knowledge excerpts in context${d.auto ? ' (automatic)' : ''}: ${(d.hits || []).map((h) => baseName(h.path)).slice(0, 4).join(', ')}`);
@@ -630,7 +631,11 @@
   // gate, any provider-level error counts), so refreshHealth() just needs to run soon after. endLive() calls
   // it with force=true right when a turn ends; the 60s interval is only the floor for an otherwise idle screen.
   // a tool call the model wrote as text that did not run (untagged, unreadable, or cut off at the output limit)
-  const noteText = (d) => { const n = d.name ? d.name.split('__').pop() : 'a tool'; return d.reason === 'cut_off' ? `call to ${n} was cut off at the output limit and did not run` : d.reason === 'malformed' ? `a tool call could not be read and did not run` : `call to ${n} was written as text and did not run`; };
+  // why an answer ended, as the model server said it: a normal end shows only in the tooltip
+  const NORMAL_FINISH = new Set(['stop', 'tool_calls', 'end_turn', 'tool_use', 'STOP', 'stop_sequence']);
+  const finishTitle = (f) => `ended: ${f.finish}${f.stop_reason != null ? ` · stop_reason ${f.stop_reason}` : ''}${f.out != null ? ` · ${f.out} output tokens` : ''}`;
+  const noteText = (d) => { if (d.note === 'continue') return `answer stopped mid-sentence (${d.finish || 'stop'}${d.output_tokens != null ? ', ' + d.output_tokens + ' tokens' : ''}) · asked the model to continue`; return strayText(d); };
+  const strayText = (d) => { const n = d.name ? d.name.split('__').pop() : 'a tool'; return d.reason === 'cut_off' ? `call to ${n} was cut off at the output limit and did not run` : d.reason === 'malformed' ? `a tool call could not be read and did not run` : `call to ${n} was written as text and did not run`; };
   // wake jobs (MCP Restart with a wake command, e.g. bringing a GPU server up): progress, remaining time, reconnect
   const wakeActive = (j) => j && (j.state === 'running' || j.state === 'reconnecting');
   const fmtLeft = (s) => s == null || s <= 0 ? '' : s < 60 ? `about ${Math.round(s)} s left` : `about ${Math.round(s / 60)} min left`;

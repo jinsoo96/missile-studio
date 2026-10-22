@@ -352,6 +352,44 @@ def _stray_tool_call(text: str, tools: list, finish: str, prompt_mode: bool, rej
     return None
 
 
+# an answer that stopped mid-sentence while tools were in play: asked once to continue from where it stopped
+CONTINUE_NUDGES = 1
+_TERMINAL = set(".!?。！？…~)]}」』\"'`*:;>")
+# endings a Korean sentence or short answer usually stops on (다/요/까 …, and nouns like 완료·성공·중 that close a status line)
+_KO_END = set("다요죠까네군지어아야해래게걸데세듯줘봐와워음함됨임료공패중")
+
+
+def _looks_unfinished(text: str, finish: str) -> bool:
+    """True when the answer seems to stop mid-sentence: the output limit, an open code block, a trailing comma, a
+    Korean word that is not a sentence ending, or a long prose line ending on a lowercase letter. Lists, headings
+    and tables (no final punctuation by nature) and short Latin answers count as finished."""
+    t = (text or "").rstrip()
+    if not t:
+        return False
+    if finish == "length" or t.count("```") % 2 == 1:
+        return True
+    last_line = t.splitlines()[-1].strip()
+    if last_line.startswith(("#", "|", "-", "*", ">", "```")) or re.match(r"^\d+[.)]\s", last_line):
+        return False
+    ch = t[-1]
+    if ch in ",、":
+        return True
+    if ch in _TERMINAL:
+        return False
+    if "가" <= ch <= "힣":
+        return ch not in _KO_END
+    if ch.isalpha():
+        return len(last_line.split()) >= 6 and ch.islower()
+    return False  # digits, emoji, other symbols
+
+
+def _continue_nudge(finish: str, out_tokens: Any, prompt_mode: bool) -> str:
+    why = f"{finish or 'stop'}" + (f", {out_tokens} tokens" if out_tokens else "")
+    call = f"call it now (inside {TOOL_CALL_OPEN} tags)" if prompt_mode else "call it now"
+    return (f"your last message stopped mid-sentence ({why}). Continue from exactly where you stopped without repeating "
+            f"what you already wrote; if you were about to call a tool, {call}")
+
+
 def _stray_nudge(stray: dict, prompt_mode: bool) -> str:
     name = stray.get("name") or "a tool"
     if stray["reason"] == "cut_off":
@@ -1001,6 +1039,7 @@ class Engine:
         pending: dict[str, dict] = {}  # tool calls of the current assistant message that have no result yet
         seen_calls: dict[str, int] = {}  # (tool + args) -> how many times this turn, to catch a polling loop
         stray_nudges = 0  # times this turn the model was asked to resend a call it wrote as text
+        continue_nudges = 0  # times this turn the model was asked to continue an answer that stopped mid-sentence
         try:
             for iterations in range(1, max_iter + 1):
                 text_parts: list[str] = []
@@ -1010,6 +1049,8 @@ class Engine:
                 had_error = False
                 error_text = ""
                 usage: Optional[dict] = None
+                server_finish: Optional[str] = None  # what the model server said ended the answer (stop, length, …)
+                stop_reason: Any = None  # and, where the server reports it, which token or string did
                 t_iter = time.time()
                 attempt = 0
                 ctx_shrinks = 0
@@ -1071,6 +1112,8 @@ class Engine:
                             yield ev
                         elif et == "done":
                             finish = ev.get("finish_reason", "stop")
+                            server_finish = ev.get("server_finish") or ev.get("finish_reason")
+                            stop_reason = ev.get("stop_reason")
                         elif et == "usage":
                             usage = {k: v for k, v in ev.items() if k != "type"}
                             yield ev
@@ -1113,6 +1156,10 @@ class Engine:
                 if calls:
                     assistant_msg["tool_calls"] = [{"id": c["id"], "name": c["name"], "arguments": c.get("arguments") or {}} for c in calls]
                 assistant_msg["meta"] = {"provider": pid, "model": model, "duration_ms": int((time.time() - t_iter) * 1000)}
+                if server_finish:  # why the answer ended, kept on every answer so a cut-short one explains itself
+                    assistant_msg["meta"]["finish"] = server_finish
+                if stop_reason is not None:
+                    assistant_msg["meta"]["stop_reason"] = stop_reason
                 if usage:
                     assistant_msg["meta"]["usage"] = usage
                 if had_error:
@@ -1135,6 +1182,19 @@ class Engine:
                         if retry:
                             stray_nudges += 1
                             note = {"role": "user", "content": NOTE_PREFIX + _stray_nudge(stray, prompt_tools) + ")", "meta": {"note": "tool_call_not_run", **stray}}
+                            self.store.append_message(req.conversation_id, note)
+                            yield {"type": "message", "message": note}
+                            messages.append(_strip(note))
+                            continue
+                    elif tools and _looks_unfinished(assistant_msg["content"], server_finish or finish):
+                        # stopped mid-sentence while working (whatever the cause): ask once to carry on, so the user
+                        # does not have to keep asking "done yet?"
+                        out_tokens = (usage or {}).get("output_tokens")
+                        retry = continue_nudges < CONTINUE_NUDGES
+                        yield {"type": "status", "event": "answer_cut_off", "data": {"finish": server_finish or finish, "stop_reason": stop_reason, "output_tokens": out_tokens, "retry": retry}}
+                        if retry:
+                            continue_nudges += 1
+                            note = {"role": "user", "content": NOTE_PREFIX + _continue_nudge(server_finish or finish, out_tokens, prompt_tools) + ")", "meta": {"note": "continue", "finish": server_finish or finish, "output_tokens": out_tokens}}
                             self.store.append_message(req.conversation_id, note)
                             yield {"type": "message", "message": note}
                             messages.append(_strip(note))
