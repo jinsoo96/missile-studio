@@ -89,6 +89,15 @@ def _short(text: str, n: int = 90) -> str:
     return t if len(t) <= n else t[: n - 1].rstrip() + "…"
 
 
+def _compact_schema(schema: Any) -> Any:
+    """A JSON schema without the decoration pydantic adds (titles), so a loaded tool costs fewer tokens."""
+    if isinstance(schema, dict):
+        return {k: _compact_schema(v) for k, v in schema.items() if k != "title"}
+    if isinstance(schema, list):
+        return [_compact_schema(v) for v in schema]
+    return schema
+
+
 def _tools_line(tools: list) -> str:
     names = ", ".join(t.full_name for t in tools[:80])
     return (
@@ -200,15 +209,76 @@ class ToolCallScanner:
         return 0
 
 
+_CJK = re.compile(r"[ㄱ-ㆎ가-힣぀-ヿ一-鿿]")
+IMAGE_TOKENS = 1600  # what one attached image costs a vision model, roughly (Qwen-VL at ~1.5 MP)
+_CTX_ERR = re.compile(r"maximum context length|context length|context_length_exceeded|too many tokens|exceeds the model's max|prompt is too long|input length", re.I)
+
+
+def _text_tokens(s: str) -> int:
+    """Rough token count: Korean/CJK runs at about one token per character, everything else at about three chars."""
+    cjk = len(_CJK.findall(s))
+    return cjk + (len(s) - cjk) // 3 + 1
+
+
 def _estimate_tokens(messages: list[dict]) -> int:
-    """Rough token count for budgeting (Korean and code run denser than English; 3 chars per token is a safe middle)."""
     n = 0
     for m in messages:
         c = m.get("content")
-        n += len(c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)) // 3 + 8
+        if isinstance(c, list):
+            for p in c:
+                n += IMAGE_TOKENS if isinstance(p, dict) and p.get("type") == "image_url" else _text_tokens(str((p or {}).get("text", "")) if isinstance(p, dict) else str(p))
+        else:
+            n += _text_tokens(c if isinstance(c, str) else json.dumps(c, ensure_ascii=False))
+        n += 8
         if m.get("tool_calls"):
-            n += len(json.dumps(m["tool_calls"], ensure_ascii=False)) // 3
+            n += _text_tokens(json.dumps(m["tool_calls"], ensure_ascii=False))
     return n
+
+
+def _tail_tokens(text: str, max_tokens: int) -> str:
+    """The end of ``text`` that fits in ``max_tokens`` (by the same rough estimate)."""
+    if _text_tokens(text) <= max_tokens:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:  # the shortest prefix to drop
+        mid = (lo + hi) // 2
+        if _text_tokens(text[mid:]) <= max_tokens:
+            hi = mid
+        else:
+            lo = mid + 1
+    return text[lo:]
+
+
+def _is_tool_result(m: dict) -> bool:
+    return m.get("role") == "tool" or (m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].startswith("<tool_response>"))
+
+
+def _fit_messages(messages: list[dict], limit: int, force: bool = False) -> tuple[list[dict], bool]:
+    """Make a request fit a small context: shorten older tool results, keep only the latest image, then drop the
+    oldest exchanges from a user-message boundary. The system message and the newest messages survive.
+    Returns (messages, changed). The stored thread is untouched; this only shapes what the model is sent."""
+    if not force and _estimate_tokens(messages) <= limit:
+        return messages, False
+    out = [dict(m) for m in messages]
+    keep_from = max(1, len(out) - 4)
+    note = "\n…[result shortened to fit the model's context; call the tool again (narrower, or with offset/limit) if you need the rest]"
+    for i in range(1, keep_from):
+        m = out[i]
+        if _is_tool_result(m) and isinstance(m.get("content"), str) and len(m["content"]) > 1400:
+            out[i] = {**m, "content": m["content"][:1200] + note}
+    last_img = max((i for i, m in enumerate(out) if isinstance(m.get("content"), list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])), default=-1)
+    for i, m in enumerate(out):
+        if i != last_img and isinstance(m.get("content"), list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"]):
+            out[i] = {**m, "content": "(an image shown earlier was omitted to fit the model's context)"}
+    while _estimate_tokens(out) > limit and len(out) > 3:
+        # drop the oldest exchange: everything up to the next user message that starts a turn
+        nxt = next((i for i in range(2, len(out) - 1) if out[i].get("role") == "user" and not _is_tool_result(out[i])), None)
+        if nxt is None:
+            break
+        out = [out[0]] + out[nxt:]
+        if out[1].get("role") == "user" and isinstance(out[1].get("content"), str) and not out[1]["content"].startswith("(earlier"):
+            out[1] = {**out[1], "content": "(earlier messages were omitted to fit the model's context)\n\n" + out[1]["content"]}
+    return out, True
 
 
 @dataclass
@@ -524,7 +594,8 @@ class Engine:
             picked += [t for s, t in ranked[:limit] if s > 0]
         for t in picked:
             loaded.add(t.full_name)
-        body = {"loaded": [t.as_llm_tool() for t in picked], "not_found": missing, "now_available": sorted(loaded)}
+        # the result goes into the model's context: a short description and a compact schema per tool
+        body = {"loaded": [{"name": t.full_name, "description": _short(t.description, 400), "input_schema": _compact_schema(t.input_schema)} for t in picked], "not_found": missing, "now_available": sorted(loaded)}
         if not picked:
             body["hint"] = "no tool matched; use exact names from the catalog or different words"
         return {"text": json.dumps(body, ensure_ascii=False), "is_error": not picked, "content": [], "loaded": [t.full_name for t in picked]}
@@ -540,7 +611,7 @@ class Engine:
                 return history[idx + 1 :], summary
         return history, ""
 
-    async def _compact(self, cid: str, history: list[dict], summary: str, provider: BaseProvider, model: str) -> tuple[list[dict], str]:
+    async def _compact(self, cid: str, history: list[dict], summary: str, provider: BaseProvider, model: str, ctx: int = 128_000) -> tuple[list[dict], str]:
         """Fold everything but the last few messages into a summary written by the same model; keep the tail verbatim."""
         if len(history) <= COMPACT_KEEP_TAIL + 2:
             return history, summary
@@ -554,7 +625,7 @@ class Engine:
         for m in old:
             body = _message_text(m) or (json.dumps(m.get("tool_calls"), ensure_ascii=False) if m.get("tool_calls") else "")
             lines.append(f"{m.get('role')}: {body[:2000]}")
-        transcript = "\n".join(lines)[-60000:]
+        transcript = _tail_tokens("\n".join(lines)[-60000:], int(ctx * 0.45))  # the summary request must fit the model too
         prompt = [{"role": "system", "content": SUMMARY_PROMPT}, {"role": "user", "content": (f"Previous summary:\n{summary}\n\n" if summary else "") + "Transcript to fold in:\n" + transcript}]
         text = ""
         try:
@@ -643,11 +714,16 @@ class Engine:
             yield {"type": "status", "event": "tool_catalog", "data": {"total": len(tools), "loaded": sorted(loaded)}}
 
         history, summary = self._apply_summary(conv, history)
-        budget = int((pcfg.context_tokens() if pcfg else 128_000) * 0.6)
+        ctx = pcfg.context_tokens() if pcfg else 128_000
+        # what the tool definitions (or the catalog) will cost, so a small model compacts early enough
+        tools_est = _text_tokens(_tools_prompt(tools_active) if (tools and getattr(pcfg, "tools_via_prompt", False)) else json.dumps(llm_tools or [], ensure_ascii=False)) + (_text_tokens(_catalog_prompt(tools, loaded)) if catalog_on else 0)
+        budget = max(ctx // 5, int(ctx * 0.6) - tools_est - min(1200, ctx // 10))  # the rest: system prompt, memories, knowledge, the answer
         if _estimate_tokens(history) > budget:
             yield {"type": "status", "event": "compacting", "data": {"messages": len(history)}}
-            history, summary = await self._compact(req.conversation_id, history, summary, provider, model)
+            history, summary = await self._compact(req.conversation_id, history, summary, provider, model, ctx)
             yield {"type": "status", "event": "compacted", "data": {"kept": len(history)}}
+        input_limit = int(ctx * 0.8)  # what one request may carry; the rest is for the answer
+        tool_cap = max(1500, ctx // 4) if ctx <= 32_000 else 60_000  # chars of one tool result shown to a small model
         user_msg = self._build_user_message(req)
         self.store.append_message(req.conversation_id, user_msg)
         yield {"type": "message", "message": user_msg}
@@ -725,12 +801,17 @@ class Engine:
                 usage: Optional[dict] = None
                 t_iter = time.time()
                 attempt = 0
+                ctx_shrinks = 0
                 while True:  # the request is retried while nothing has been produced yet (429, 5xx, connection errors)
                     attempt += 1
                     produced = False
                     retry_wait = 0.0
                     switch_prompt = False
+                    ctx_retry = False
                     scanner = ToolCallScanner() if prompt_tools else None
+                    messages, trimmed = _fit_messages(messages, input_limit)
+                    if trimmed:
+                        yield {"type": "status", "event": "context_trimmed", "data": {"tokens": _estimate_tokens(messages), "limit": input_limit}}
                     async for ev in provider.stream(model, messages, llm_tools, options):
                         et = ev.get("type")
                         if et == "text_delta":
@@ -766,6 +847,14 @@ class Engine:
                                 retry_wait = min(8.0, 1.5 ** attempt)
                                 error_text = msg
                                 break
+                            if not produced and _CTX_ERR.search(msg) and ctx_shrinks < 2:
+                                # the model's limit was hit anyway (our estimate was low): cut harder and send again
+                                ctx_shrinks += 1
+                                input_limit = int(input_limit * 0.65)
+                                messages, _ = _fit_messages(messages, input_limit, force=True)
+                                retry_wait, ctx_retry, error_text = 0.05, True, msg
+                                attempt -= 1
+                                break
                             had_error = True
                             error_text = msg
                             yield ev
@@ -798,7 +887,10 @@ class Engine:
                         if calls and not had_error:
                             finish = "tool_calls"
                     if retry_wait:
-                        yield {"type": "status", "event": "retry", "data": {"attempt": attempt, "wait": retry_wait, "reason": error_text[:200]}}
+                        if ctx_retry:
+                            yield {"type": "status", "event": "context_trimmed", "data": {"tokens": _estimate_tokens(messages), "limit": input_limit, "reason": error_text[:160]}}
+                        else:
+                            yield {"type": "status", "event": "retry", "data": {"attempt": attempt, "wait": retry_wait, "reason": error_text[:200]}}
                         await asyncio.sleep(retry_wait)
                         continue
                     break
@@ -906,8 +998,11 @@ class Engine:
                         pending.pop(c["id"], None)
                         yield {"type": "tool_result", "id": c["id"], "name": c["name"], "is_error": tool_msg["is_error"], "text": text[:4000], "duration_ms": dur, "decision": decision, "images": tool_msg.get("images", [])}
                         yield {"type": "message", "message": tool_msg}
-                        messages.append(_promptify([_strip(tool_msg)])[0] if prompt_tools else _strip(tool_msg))
-                        # Gemini/Anthropic can take image tool results as a follow-up user message
+                        model_msg = _strip(tool_msg)
+                        if len(model_msg.get("content") or "") > tool_cap:  # a small model gets the head; the thread keeps everything
+                            model_msg["content"] = model_msg["content"][:tool_cap] + f"\n…[shortened for the model's context: {len(tool_msg['content']) - tool_cap} more chars; call the tool again narrower or with offset/limit for the rest]"
+                        messages.append(_promptify([model_msg])[0] if prompt_tools else model_msg)
+                        # image tool results go to the model as a follow-up user message (only the latest image survives trimming)
                         if images:
                             messages.append({"role": "user", "content": [{"type": "text", "text": f"(image returned by {c['name']})"}] + [{"type": "image_url", "image_url": {"url": f"data:{im.get('mime_type', 'image/png')};base64,{im.get('data', '')}"}} for im in images[:2]]})
                     if catalog_on and loaded != loaded_before:
