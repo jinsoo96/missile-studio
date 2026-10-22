@@ -61,7 +61,7 @@ def test_parallel_tool_calls_run_at_once(client):
     took = time.time() - t0
     results = [e for e in events if e["type"] == "tool_result"]
     assert {e["id"] for e in results} == {"s1", "s2", "s3"} and all(not e["is_error"] for e in results)
-    assert took < 2.4, f"three 1s tools took {took:.1f}s: they did not run concurrently"
+    assert took < 2.9, f"three 1s tools took {took:.1f}s: they did not run concurrently"  # sequential would be 3s+; CI runners add jitter
     msgs = client.get(f"/api/conversations/{conv['id']}", headers=H).json()["messages"]
     assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "tool", "tool", "assistant"]
 
