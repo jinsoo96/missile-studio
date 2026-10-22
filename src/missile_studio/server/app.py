@@ -771,7 +771,10 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
                         err = str(ev.get("message", ""))
                 if used_pid and got_text:
                     _note_health(used_pid, "ok")
-                elif used_pid and err and (re.search(r"\b5\d\d\b|Connect|timed out|timeout|RemoteProtocol|ReadError", err)):
+                elif used_pid and err:
+                    # any provider-level error that reached here already survived the engine's own retries/compaction/
+                    # trimming, so it is real evidence the provider is unreachable right now, not a one-off 400: mark it
+                    # down immediately rather than waiting for the next periodic probe (up to 120s away)
                     _note_health(used_pid, "down", err)
             except asyncio.CancelledError:
                 await ts.push({"type": "done", "finish_reason": "cancelled"})

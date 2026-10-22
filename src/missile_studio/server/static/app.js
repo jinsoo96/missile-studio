@@ -576,7 +576,7 @@
     try { await pumpStream(r, pane, live); } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); await endLive(pane, live); }
     return true;
   }
-  async function endLive(pane, live) { if (S.live[live.convId] !== live) return; delete S.live[live.convId]; await refreshConv(live.convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); }
+  async function endLive(pane, live) { if (S.live[live.convId] !== live) return; delete S.live[live.convId]; await refreshConv(live.convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); refreshHealth(true); }
   async function pumpStream(r, pane, live) {
     const { node, content } = live;
     const scrollOf = () => { const inner = node.closest('.chat-inner'); return inner ? inner.parentElement : null; };
@@ -622,8 +622,11 @@
       }
     }
   }
-  // provider reachability: refresh the dots and dimming once a minute (no re-render while someone is typing or a turn streams)
-  setInterval(async () => { if (!S.st) return; try { const h = await api('/api/providers/health'); let changed = false; for (const p of S.st.providers) { const n = h[p.id]; if (n && (p.health?.state !== n.state || p.health?.error !== n.error)) { p.health = n; changed = true; } } if (changed && S.view === 'chat' && !Object.keys(S.live).length && !/TEXTAREA|INPUT/.test(document.activeElement?.tagName || '')) render(); } catch {} }, 60000);
+  // provider reachability: the server already marks a provider down the moment a live turn fails (no regex
+  // gate, any provider-level error counts), so refreshHealth() just needs to run soon after. endLive() calls
+  // it with force=true right when a turn ends; the 60s interval is only the floor for an otherwise idle screen.
+  async function refreshHealth(force) { if (!S.st) return; try { const h = await api('/api/providers/health'); let changed = false; for (const p of S.st.providers) { const n = h[p.id]; if (n && (p.health?.state !== n.state || p.health?.error !== n.error)) { p.health = n; changed = true; } } if ((changed || force) && S.view === 'chat' && !Object.keys(S.live).length && !/TEXTAREA|INPUT/.test(document.activeElement?.tagName || '')) render(); } catch {} }
+  setInterval(() => refreshHealth(false), 60000);
   setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } for (const p of S.panes) { const c = S.convs.find((x) => x.id === p.convId); if (c && c.running && !S.live[p.convId]) attachStream(p, p.convId); } } catch {} }, 6000);
   // a deployed update: when the server's version no longer matches the assets this tab loaded, reload (between turns) so nobody keeps an old UI
   const LOADED_VERSION = (document.querySelector('script[src*="app.js"]')?.getAttribute('src') || '').split('v=')[1] || '';

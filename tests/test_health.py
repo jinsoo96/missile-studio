@@ -55,3 +55,19 @@ def test_turns_update_health(client):
     with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "once more"}, headers=H) as r:
         read_sse(r)
     assert _health(client, refresh=False)["fake"]["state"] == "ok"
+
+
+def test_a_failed_turn_marks_the_provider_down_immediately_without_waiting_for_a_5xx(client):
+    """Before this fix only 5xx/connection-shaped errors marked a provider down from a live turn; a plain HTTP 404
+    (a dead RunPod-style proxy, no backend at all) did not. Any provider-level error now counts."""
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    FakeProvider.script = [[{"type": "error", "message": "HTTP 404 from dead-pod-8000.proxy.runpod.net: (empty response body)"}]]
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "hi"}, headers=H) as r:
+        read_sse(r)
+    h = client.get("/api/providers/health", headers=H).json()["fake"]
+    assert h["state"] == "down" and "404" in h["error"]
+    # a later successful turn clears it again
+    FakeProvider.script = [[{"type": "text_delta", "text": "back"}, {"type": "done", "finish_reason": "stop"}]]
+    with client.stream("POST", "/api/chat", json={"conversation_id": conv["id"], "text": "again"}, headers=H) as r:
+        read_sse(r)
+    assert client.get("/api/providers/health", headers=H).json()["fake"]["state"] == "ok"

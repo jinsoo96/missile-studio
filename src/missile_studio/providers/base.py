@@ -171,4 +171,4 @@ async def error_text(resp: httpx.Response) -> str:
         text = body.decode("utf-8", "replace")
     except Exception:  # pragma: no cover
         text = ""
-    return f"HTTP {resp.status_code} from {resp.request.url.host}: {text[:800]}"
+    return f"HTTP {resp.status_code} from {resp.request.url.host}: {text[:800] or '(empty response body)'}"
