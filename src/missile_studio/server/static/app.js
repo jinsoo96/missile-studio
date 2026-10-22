@@ -189,13 +189,40 @@
   async function setStyle(pane, sid) { pane.sel.style = sid === 'normal' ? '' : sid; await patchConv(pane, { style_id: pane.sel.style }); render(); }
   async function setAssistant(pane, aid) { pane.sel.assistant = aid; await patchConv(pane, { assistant_id: aid }); render(); }
 
+  // ---------------------------------------------------------------- sidebar: drag its edge to resize, Ctrl/⌘ B to hide (both remembered in this browser)
+  const PANE_W = { min: 200, max: 480, def: 272 };
+  const ui = { paneW: PANE_W.def, paneHidden: false, mobilePane: false };
+  try { const w = parseInt(localStorage.getItem('missile_pane_w'), 10); if (w) ui.paneW = Math.min(PANE_W.max, Math.max(PANE_W.min, w)); ui.paneHidden = localStorage.getItem('missile_pane_hidden') === '1'; } catch {}
+  const narrow = () => matchMedia('(max-width: 900px)').matches;  // the list opens over the chat there
+  function setPaneHidden(v) { ui.paneHidden = v; try { localStorage.setItem('missile_pane_hidden', v ? '1' : '0'); } catch {} }
+  function togglePane() { if (narrow()) ui.mobilePane = !ui.mobilePane; else setPaneHidden(!ui.paneHidden); render(); }
+  function setPaneW(w, save) { ui.paneW = Math.min(PANE_W.max, Math.max(PANE_W.min, Math.round(w))); $('.shell')?.style.setProperty('--pane', ui.paneW + 'px'); if (save) try { localStorage.setItem('missile_pane_w', String(ui.paneW)); } catch {} }
+  function paneGrip() {
+    const g = el('div', { class: 'pane-grip', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Resize sidebar', tabindex: '0', title: 'Drag to resize · double-click to reset' });
+    g.addEventListener('pointerdown', (e) => {
+      if (narrow() || e.button !== 0) return;
+      e.preventDefault(); g.setPointerCapture(e.pointerId);
+      const shell = g.closest('.shell'); const x0 = e.clientX, w0 = ui.paneW; let raw = w0;
+      shell.classList.add('resizing');
+      const move = (ev) => { raw = w0 + ev.clientX - x0; shell.classList.toggle('pane-closing', raw < PANE_W.min - 60); setPaneW(raw, false); };
+      const up = () => { g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); shell.classList.remove('resizing', 'pane-closing'); if (raw < PANE_W.min - 60) { setPaneW(w0, true); setPaneHidden(true); render(); } else setPaneW(ui.paneW, true); };
+      g.addEventListener('pointermove', move); g.addEventListener('pointerup', up);
+    });
+    g.addEventListener('dblclick', () => setPaneW(PANE_W.def, true));
+    g.addEventListener('keydown', (e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setPaneW(ui.paneW + (e.key === 'ArrowLeft' ? -16 : 16), true); } });
+    return g;
+  }
+  const hidePaneBtn = () => el('button', { class: 'btn quiet icon sm', title: 'Hide sidebar (Ctrl/⌘ B)', 'aria-label': 'Hide sidebar', onclick: togglePane }, I('sidebar', 'sm'));
+
   // ---------------------------------------------------------------- shell
   function render() {
     const app = $('#app'); app.innerHTML = '';
     if (S.view.startsWith('settings')) { app.append(renderSettings()); return; }
-    const shell = el('div', { class: 'shell' });
+    const showPane = !ui.paneHidden || narrow();
+    const shell = el('div', { class: 'shell' + (showPane ? '' : ' no-pane') + (ui.mobilePane ? ' show-pane' : ''), style: `--pane:${ui.paneW}px` });
     shell.append(renderRail());
-    shell.append(S.view === 'assistants' ? renderAssistantPane() : renderConvPane());
+    if (showPane) shell.append(S.view === 'assistants' ? renderAssistantPane() : renderConvPane());
+    if (ui.mobilePane) shell.append(el('div', { class: 'pane-scrim', onclick: () => { ui.mobilePane = false; render(); } }));
     const main = el('div', { class: 'main multi' });
     const panes = el('div', { class: 'panes' });
     S.panes.forEach((p, i) => panes.append(renderPane(p, i)));
@@ -208,10 +235,13 @@
   function renderRail() {
     const btn = (name, icon, label, onclick) => el('button', { class: S.view === name || (name === 'settings' && S.view.startsWith('settings')) ? 'active' : '', onclick, 'aria-label': label }, I(icon), el('span', { class: 'tip' }, label));
     const cur = theme.get();
+    // clicking the view you are already on shows or hides its list; switching views brings the list back
+    const view = (name) => () => { if (S.view === name) return togglePane(); S.view = name; if (ui.paneHidden) setPaneHidden(false); render(); };
+    const listTip = (name, label) => S.view === name ? (ui.paneHidden && !narrow() ? `Show ${label.toLowerCase()}` : `${label} · click to hide the list`) : label;
     return el('div', { class: 'rail' },
-      el('div', { class: 'logo', html: window.logoMark(34), title: 'missile studio' }),
-      btn('chat', 'chat', 'Chat', () => { S.view = 'chat'; render(); }),
-      btn('assistants', 'sparkles', 'Assistants', () => { S.view = 'assistants'; render(); }),
+      el('button', { class: 'logo', html: window.logoMark(34), 'aria-label': 'About missile studio', onclick: () => openIntro() }, el('span', { class: 'tip' }, 'About missile studio')),
+      btn('chat', 'chat', listTip('chat', 'Chats'), view('chat')),
+      btn('assistants', 'sparkles', listTip('assistants', 'Assistants'), view('assistants')),
       btn('settings', 'settings', 'Settings', () => { S.view = 'settings'; render(); }),
       el('div', { class: 'bottom' },
         el('button', { class: S.drawer.open ? 'active' : '', onclick: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }, 'aria-label': 'workspace' }, I('file'), el('span', { class: 'tip' }, 'Workspace · artifacts (Ctrl/⌘ J)')),
@@ -230,7 +260,7 @@
   }
   function renderConvPane() {
     const pane = el('div', { class: 'pane' });
-    pane.append(el('div', { class: 'pane-head' }, el('h2', {}, 'Chats'), el('span', { class: 'spacer' }), el('button', { class: 'btn primary sm', onclick: () => newConv(activePane()) }, I('plus', 'sm'), 'New chat')));
+    pane.append(paneGrip(), el('div', { class: 'pane-head' }, el('h2', {}, 'Chats'), el('span', { class: 'spacer' }), el('button', { class: 'btn primary sm', onclick: () => newConv(activePane()) }, I('plus', 'sm'), 'New chat'), hidePaneBtn()));
     const search = el('input', { class: 'input', placeholder: 'Search chats', value: S.search, oninput: (e) => { S.search = e.target.value; renderList(); } });
     pane.append(el('div', { class: 'pane-search' }, I('search', 'sm'), search));
     const list = el('div', { class: 'pane-list' }); pane.append(list);
@@ -267,7 +297,7 @@
   }
   function renderAssistantPane() {
     const pane = el('div', { class: 'pane' });
-    pane.append(el('div', { class: 'pane-head' }, el('h2', {}, 'Assistants'), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; render(); } }, I('edit', 'sm'), 'Manage')));
+    pane.append(paneGrip(), el('div', { class: 'pane-head' }, el('h2', {}, 'Assistants'), el('span', { class: 'spacer' }), el('button', { class: 'btn sm', onclick: () => { S.view = 'settings'; S.settingsPage = 'assistants'; render(); } }, I('edit', 'sm'), 'Manage'), hidePaneBtn()));
     const list = el('div', { class: 'pane-list' }); pane.append(list);
     const cur = targetOf(activePane());
     for (const a of S.st.assistants) list.append(el('div', { class: 'pane-item' + (cur.aid === a.id ? ' active' : ''), onclick: () => setAssistant(activePane(), a.id) }, customEmoji(a) ? el('div', { class: 'em' }, customEmoji(a)) : null, el('div', { class: 'body' }, el('div', { class: 'title truncate' }, a.name), el('div', { class: 'sub truncate' }, (a.system_prompt || 'No system prompt').slice(0, 60)))));
@@ -325,7 +355,9 @@
     const toolsBtn = t.provider?.kind === 'agentserver' ? el('span', { class: 'chip info', title: 'tools run on the agent server' }, I('cloud', 'xs')) : el('button', { class: 'ico' + (toolsOn ? ' on' : ''), title: toolsOn ? `${S.st.tools.length} local tools on · click to turn off` : 'tools off · click to turn on', onclick: () => { pane.sel.tools = !toolsOn; render(); } }, I('wrench', 'sm'));
     const waking = (S.st.wake || []).filter(wakeActive);
     const wakeChip = waking.length ? el('button', { class: 'chip info wake-chip', title: waking.map((j) => `${j.server}: ${j.stage}`).join('\n'), onclick: () => { S.view = 'settings'; S.settingsPage = 'mcp'; S.sel.mcpName = waking[0].server; render(); } }, I('refresh', 'xs'), `waking ${waking[0].server} · ${wakeLabel(waking[0])}`) : null;
-    const bar = el('div', { class: 'topbar' }, asstBtn, modelPicker(pane), thinkingButton(pane), toolsBtn, wakeChip, el('span', { class: 'spacer' }));
+    const showPaneBtn = idx === 0 && (ui.paneHidden || narrow()) ? el('button', { class: 'ico', title: 'Show sidebar (Ctrl/⌘ B)', 'aria-label': 'Show sidebar', onclick: togglePane }, I('sidebar', 'sm')) : null;
+    const bar = el('div', { class: 'topbar' }, showPaneBtn, asstBtn, modelPicker(pane), thinkingButton(pane), toolsBtn, wakeChip, el('span', { class: 'spacer' }));
+    if (idx === S.panes.length - 1 && S.st.version) bar.append(el('button', { class: 'ver', title: `missile studio ${S.st.version} · what this is`, onclick: () => openIntro() }, 'v' + S.st.version));
     if (S.panes.length > 1) bar.append(el('button', { class: 'ico' + (S.linkInputs ? ' on' : ''), title: S.linkInputs ? 'inputs linked: one message goes to every pane' : 'link inputs: send one message to every pane (compare models)', onclick: () => { S.linkInputs = !S.linkInputs; render(); } }, I('link', 'sm')));
     if (S.panes.length < MAX_PANES) bar.append(el('button', { class: 'ico', title: 'Split: open another chat beside this one (Ctrl/⌘ \\)', onclick: () => splitPane(idx) }, I('columns', 'sm')));
     if (S.panes.length > 1) bar.append(el('button', { class: 'ico', title: 'Close this pane', onclick: () => closePane(idx) }, I('x', 'sm')));
@@ -526,9 +558,9 @@
       { group: 'Tools (inserts a request to use the tool)' }, ...S.st.tools.map((tl) => ({ label: `/tool ${tl.full_name}`, sub: (tl.description || '').slice(0, 50), icon: 'wrench', insert: `Use the \`${tl.full_name}\` tool to ` }))];
     return menu(ta, items, { filter: q, onPick: (it) => { if (it.insert) { ta.value = it.insert; pane.draft = ta.value; ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } else { ta.value = ''; pane.draft = ''; it.run(); } } });
   }
-  function newConv(pane) { pane.convId = null; pane.conv = null; pane.messages = []; pane.branches = {}; pane.editing = null; S.view = 'chat'; render(); $('.composerInput', paneEl(pane))?.focus(); }
+  function newConv(pane) { pane.convId = null; pane.conv = null; pane.messages = []; pane.branches = {}; pane.editing = null; S.view = 'chat'; ui.mobilePane = false; render(); $('.composerInput', paneEl(pane))?.focus(); }
   async function openConv(pane, id) {
-    const c = await api('/api/conversations/' + id); pane.convId = id; pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; pane.editing = null; S.view = 'chat'; render();
+    const c = await api('/api/conversations/' + id); pane.convId = id; pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; pane.editing = null; S.view = 'chat'; ui.mobilePane = false; render();
     if ((S.convs.find((x) => x.id === id) || {}).running && !S.live[id]) attachStream(pane, id);  // a turn still running on the server: follow it
   }
   async function stopTurn(pane) { if (pane.convId) await api(`/api/chat/${pane.convId}/stop`, { method: 'POST' }).catch(() => {}); const live = S.live[pane.convId]; if (live?.abort) live.abort.abort(); }
@@ -668,6 +700,57 @@
   const LOADED_VERSION = (document.querySelector('script[src*="app.js"]')?.getAttribute('src') || '').split('v=')[1] || '';
   setInterval(async () => { try { const h = await fetch('/api/health').then((r) => r.json()); if (LOADED_VERSION && h.version && h.version !== LOADED_VERSION && !Object.keys(S.live).length) { toast(`Updated to ${h.version}, reloading…`); setTimeout(() => location.reload(), 1200); } } catch {} }, 45000);
 
+  // ---------------------------------------------------------------- intro: what this launchpad does (the mark in the rail, the version chip, once on a first visit)
+  const ROCKET = '<svg viewBox="0 0 40 124" width="40" height="124"><defs>'
+    + '<linearGradient id="rkBody" x1="0" x2="1"><stop offset="0" stop-color="#c9cee2"/><stop offset=".5" stop-color="#f5f6fb"/><stop offset="1" stop-color="#b3b9d3"/></linearGradient>'
+    + '<linearGradient id="rkFlame" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fffbe8"/><stop offset=".3" stop-color="#fcd34d"/><stop offset=".7" stop-color="#fb923c"/><stop offset="1" stop-color="#f97316" stop-opacity="0"/></linearGradient></defs>'
+    + '<path class="flame" d="M12 92 Q20 136 28 92 Z" fill="url(#rkFlame)"/>'
+    + '<path d="M20 3 C30 15 32 30 32 44 L32 92 L8 92 L8 44 C8 30 10 15 20 3 Z" fill="url(#rkBody)"/>'
+    + '<path d="M20 3 C26 10 29 18 30.6 27 L9.4 27 C11 18 14 10 20 3 Z" fill="#8b7cff"/>'
+    + '<circle cx="20" cy="46" r="5.5" fill="#141821" stroke="#8b7cff" stroke-width="2"/>'
+    + '<path d="M8 68 L0 92 L8 92 Z" fill="#6d5df5"/><path d="M32 68 L40 92 L32 92 Z" fill="#6d5df5"/><rect x="18" y="62" width="4" height="30" rx="2" fill="#8b7cff" opacity=".55"/></svg>';
+  function openIntro() {
+    if ($('.intro') || !S.st) return;
+    try { localStorage.setItem('missile_intro_seen', '1'); } catch {}
+    const st = S.st; const provs = st.providers || []; const servers = st.mcp || [];
+    const up = provs.filter((p) => healthOf(p).state === 'ok').length;
+    const live = servers.filter((s) => s.status === 'connected').length;
+    const t = targetOf(activePane());
+    const n = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
+    const sdot = (s) => el('span', { class: 'hdot ' + (s.status === 'connected' ? 'ok' : ['disabled', 'stopped'].includes(s.status) ? 'unknown' : 'down'), title: `${s.name}: ${s.status}` });
+    const chips = (items, more) => items.length ? el('div', { class: 'intro-chips' }, items, more > 0 ? el('span', { class: 'chip' }, `+${more}`) : null) : null;
+    const stage = (n, eyebrow, title, text, extra) => el('div', { class: 'intro-stage', style: `--d:${n}` }, el('div', { class: 'eyebrow' }, `0${n} · ${eyebrow}`), el('h4', {}, title), el('p', {}, text), extra);
+    const sky = el('div', { class: 'intro-sky' });
+    for (let i = 0; i < 30; i++) sky.append(el('i', { style: `left:${(Math.random() * 100).toFixed(1)}%;top:${(Math.random() * 78).toFixed(1)}%;animation-delay:${(Math.random() * 3).toFixed(2)}s;opacity:${(0.25 + Math.random() * 0.6).toFixed(2)}` }));
+    const count = el('div', { class: 'intro-count' }, 'T-3');
+    const scene = el('div', { class: 'intro-scene', 'aria-hidden': 'true' }, sky, el('div', { class: 'intro-tower' }), el('div', { class: 'intro-trail' }), el('div', { class: 'intro-rocket', html: ROCKET }), el('div', { class: 'intro-smoke' }, [0, 1, 2, 3, 4, 5].map(() => el('i'))), el('div', { class: 'intro-pad' }), el('div', { class: 'intro-orbit' }), count);
+    const launch = el('button', { class: 'btn primary', onclick: () => { close(); $('.composerInput', paneEl(activePane()))?.focus(); } }, I('send', 'sm'), 'Launch');
+    const ov = el('div', { class: 'intro', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'About missile studio' },
+      el('button', { class: 'btn quiet icon sm intro-x', 'aria-label': 'close', onclick: () => close() }, I('x', 'sm')),
+      el('div', { class: 'intro-box' }, scene,
+        el('div', { class: 'intro-head' }, el('span', { html: window.logoMark(40) }), el('span', { class: 'wordmark' }, 'missile', el('em', {}, 'studio'))),
+        el('p', { class: 'intro-lede' }, 'A launchpad for your models and your tools.'),
+        el('p', { class: 'intro-sub' }, 'Connect any model endpoint and the MCP servers on your own machine, then hand it the work. The agent runs the tools, keeps every request inside the model\'s context and carries the job through.'),
+        el('div', { class: 'intro-stages' },
+          stage(1, 'fuel', 'Models', `${provs.length ? `${n(provs.length, 'provider')}, ${up} reachable now.` : 'No model provider yet.'}${t.provider ? ` Default: ${t.provider.label || t.pid} · ${shortModel(t.model) || 'no model'}.` : ''} OpenAI-compatible servers, Anthropic, Gemini and your own GPU endpoints.`,
+            chips(provs.slice(0, 6).map((p) => el('span', { class: 'chip' }, hdot(p), p.label || p.id)), provs.length - 6)),
+          stage(2, 'payload', 'Tools', `${servers.length ? `${live} of ${n(servers.length, 'MCP server')} connected, ` : 'No MCP server yet, '}${n((st.tools || []).length, 'tool')} in all. Each call follows your permission mode, and only the tools a task needs are loaded.`,
+            chips(servers.slice(0, 6).map((s) => el('span', { class: 'chip' }, sdot(s), s.name)), servers.length - 6)),
+          stage(3, 'guidance', 'Harness', 'One agent loop for every model. It retries failed requests, fits long threads into small context windows, and picks an answer back up when it stops short.'),
+          stage(4, 'pad', 'Workspace', 'Files, an editor, a terminal and artifacts sit in one drawer (Ctrl/⌘ J). Chats, memory and knowledge stay on this machine.')),
+        el('div', { class: 'intro-foot' }, el('span', { class: 'chip mono' }, 'v' + (st.version || '')), el('span', { class: 'muted tiny' }, 'Ctrl/⌘ K for commands · Ctrl/⌘ B for the sidebar'), el('span', { class: 'spacer' }),
+          isAdmin() ? el('button', { class: 'btn', onclick: () => { close(); S.view = 'settings'; S.settingsPage = 'providers'; render(); } }, I('settings', 'sm'), 'Settings') : null, launch)));
+    document.body.append(ov);
+    const timers = [];
+    const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (calm) count.textContent = 'READY';
+    else [[450, 'T-2'], [900, 'T-1', 'ignite'], [1350, 'LIFTOFF', 'lift'], [3300, 'IN ORBIT', 'orbit']].forEach(([ms, txt, cls]) => timers.push(setTimeout(() => { count.textContent = txt; if (cls) scene.classList.add(cls); }, ms)));
+    const key = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+    function close() { timers.forEach(clearTimeout); ov.remove(); document.removeEventListener('keydown', key); }
+    document.addEventListener('keydown', key);
+    setTimeout(() => launch.focus({ preventScroll: true }), 0);
+  }
+
   // ---------------------------------------------------------------- palette (Ctrl/⌘ K) + shortcuts (Ctrl/⌘ /)
   function openPalette() {
     $('.palette')?.remove();
@@ -680,6 +763,8 @@
       { label: 'New chat', sub: 'Ctrl/⌘ Shift O', icon: 'plus', run: () => newConv(activePane()) },
       { label: 'Split pane', sub: 'Ctrl/⌘ \\', icon: 'columns', run: () => splitPane(S.active) },
       { label: 'Toggle workspace drawer', sub: 'Ctrl/⌘ J', icon: 'file', run: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); } },
+      { label: 'Show / hide sidebar', sub: 'Ctrl/⌘ B', icon: 'sidebar', run: () => { if (S.view.startsWith('settings')) S.view = 'chat'; togglePane(); } },
+      { label: 'About missile studio', sub: S.st?.version ? 'v' + S.st.version : '', icon: 'info', run: () => openIntro() },
       { label: 'Artifacts', sub: 'generated code & documents', icon: 'box', run: () => openDrawer('artifacts') },
       { label: 'Link pane inputs', sub: S.linkInputs ? 'on' : 'off', icon: 'link', run: () => { S.linkInputs = !S.linkInputs; render(); } },
       { label: 'Theme: dark / warm / light', sub: theme.get(), icon: 'moon', run: () => theme.toggle() },
@@ -708,7 +793,7 @@
     inp.addEventListener('input', build); document.addEventListener('keydown', key); build(); setTimeout(() => inp.focus(), 0);
   }
   function openShortcuts() {
-    const rows = [['Ctrl/⌘ K', 'Search chats & commands'], ['Ctrl/⌘ Shift O', 'New chat in the active pane'], ['Ctrl/⌘ \\', 'Split the view'], ['Ctrl/⌘ Shift W', 'Close the active pane'], ['Ctrl/⌘ J', 'Workspace drawer'], ['Ctrl/⌘ S', 'Save the open file'], ['Ctrl/⌘ ,', 'Settings'], ['Ctrl/⌘ /', 'This panel'], ['Shift Esc', 'Focus the message box'], ['Ctrl/⌘ Shift C', 'Copy the last answer'], ['Ctrl/⌘ Shift ;', 'Copy the last code block'], ['Enter / Shift Enter', 'Send / new line'], ['/ at the start', 'Commands: /new /split /files /terminal /artifacts /tools /think /style /assistant /tool'], ['Esc (while editing)', 'Cancel editing a message']];
+    const rows = [['Ctrl/⌘ K', 'Search chats & commands'], ['Ctrl/⌘ Shift O', 'New chat in the active pane'], ['Ctrl/⌘ \\', 'Split the view'], ['Ctrl/⌘ Shift W', 'Close the active pane'], ['Ctrl/⌘ J', 'Workspace drawer'], ['Ctrl/⌘ B', 'Show / hide the sidebar'], ['Ctrl/⌘ S', 'Save the open file'], ['Ctrl/⌘ ,', 'Settings'], ['Ctrl/⌘ /', 'This panel'], ['Shift Esc', 'Focus the message box'], ['Ctrl/⌘ Shift C', 'Copy the last answer'], ['Ctrl/⌘ Shift ;', 'Copy the last code block'], ['Enter / Shift Enter', 'Send / new line'], ['/ at the start', 'Commands: /new /split /files /terminal /artifacts /tools /think /style /assistant /tool'], ['Esc (while editing)', 'Cancel editing a message']];
     modal({ title: 'Keyboard shortcuts', body: el('div', { class: 'shortcuts' }, rows.map(([k, d]) => el('div', {}, el('span', {}, d), el('span', { class: 'kbd' }, k)))) });
   }
   function lastAssistantText(pane) { for (let i = pane.messages.length - 1; i >= 0; i--) { const m = pane.messages[i]; if (m.role === 'assistant' && m.content) return m.content; } return ''; }
@@ -1126,6 +1211,8 @@
     $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
     if (!S.st.providers.length) { S.view = 'settings'; S.settingsPage = 'providers'; }
     render();
+    let introSeen = true; try { introSeen = !!localStorage.getItem('missile_intro_seen'); } catch {}
+    if (!introSeen && S.view === 'chat') openIntro();
     setInterval(async () => { if (S.view.startsWith('settings') && (S.settingsPage === 'mcp' || S.settingsPage === 'agents')) { try { await loadState(); } catch {} } }, 6000);
     document.addEventListener('keydown', (e) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -1139,6 +1226,7 @@
       else if (e.key === '\\') { e.preventDefault(); splitPane(S.active); }
       else if (k === 'w' && e.shiftKey) { e.preventDefault(); closePane(S.active); }
       else if (k === 'j') { e.preventDefault(); if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }
+      else if (k === 'b' && !e.shiftKey && !S.view.startsWith('settings')) { e.preventDefault(); togglePane(); }
       else if (k === 'c' && e.shiftKey) { e.preventDefault(); const t = lastAssistantText(activePane()); if (t) navigator.clipboard.writeText(t).then(() => toast('last answer copied')); }
       else if (e.key === ';' && e.shiftKey) { e.preventDefault(); const t = lastAssistantText(activePane()); const m = [...t.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].pop(); if (m) navigator.clipboard.writeText(m[1]).then(() => toast('last code block copied')); else toast('no code block in the last answer', true); }
     });
