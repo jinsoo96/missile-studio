@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import mimetypes
+import re
 import secrets
 import time
 from pathlib import Path
@@ -34,6 +35,7 @@ from .. import __version__
 from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerConfig, ModelPreset, ProviderConfig, StyleConfig, ToolPolicy, config_path, ensure_token, home_dir
 from ..device_bridge import DeviceBridge
 from ..engine import Engine, TurnRequest
+from ..providers.base import ProviderError
 from ..mcp.importers import export_standard, import_from, known_sources, parse_servers
 from . import admin as adminmod
 
@@ -176,6 +178,51 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     app.state.bridges = {}
     app.state.turn_tasks = {}
     app.state.turn_streams = {}
+    app.state.provider_health = {}  # provider id -> {"state": ok|down|nokey|unknown, "error", "checked_at", "ms"}
+
+    # ------------------------------------------------------------ provider health (is this model reachable right now?)
+    HOSTED = ("api.openai.com", "openrouter.ai", "dashscope", "api.groq.com", "api.deepseek.com", "api.mistral.ai", "api.x.ai", "api.together", "api.fireworks", "generativelanguage")
+
+    def _needs_key(pc: ProviderConfig) -> bool:
+        return pc.kind in ("anthropic", "gemini") or any(h in (pc.base_url or "") for h in HOSTED)
+
+    async def check_provider(pc: ProviderConfig) -> dict:
+        if pc.kind != "agentserver" and _needs_key(pc) and not pc.resolved_api_key():
+            return {"state": "nokey", "error": "no API key saved", "checked_at": time.time(), "ms": 0}
+        t0 = time.time()
+        try:
+            models = await asyncio.wait_for(engine.provider(pc.id).list_models(), timeout=8.0)
+            return {"state": "ok", "error": "", "checked_at": time.time(), "ms": int((time.time() - t0) * 1000), "models": len(models)}
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}" if not isinstance(e, ProviderError) else str(e)
+            return {"state": "down", "error": msg[:220], "checked_at": time.time(), "ms": int((time.time() - t0) * 1000)}
+
+    async def refresh_health() -> dict:
+        provs = [p for p in engine.cfg.providers if p.enabled]
+        results = await asyncio.gather(*(check_provider(p) for p in provs), return_exceptions=True)
+        health = {}
+        for p, r in zip(provs, results):
+            health[p.id] = r if isinstance(r, dict) else {"state": "down", "error": str(r)[:200], "checked_at": time.time(), "ms": 0}
+        app.state.provider_health = health
+        return health
+
+    async def health_loop(interval: float = 120.0) -> None:
+        await asyncio.sleep(2)
+        while True:
+            try:
+                await refresh_health()
+            except Exception:  # pragma: no cover
+                log.exception("provider health check failed")
+            await asyncio.sleep(interval)
+
+    def _note_health(pid: str, state: str, error: str = "") -> None:
+        """A real turn is the best probe: a successful answer marks the provider ok, a transport/5xx failure marks it down."""
+        if pid:
+            app.state.provider_health[pid] = {"state": state, "error": error[:220], "checked_at": time.time(), "ms": 0}
+
+    def _with_health(d: dict) -> dict:
+        d["health"] = app.state.provider_health.get(d.get("id"), {"state": "unknown", "error": "", "checked_at": 0, "ms": 0})
+        return d
     store = engine.store
 
     # ------------------------------------------------------------ auth
@@ -243,12 +290,14 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             store.event("info", "auth", "signup invite code generated", {}, actor="system")
         store.event("info", "system", "server started", {"version": __version__, "host": engine.cfg.server.host, "port": engine.cfg.server.port}, actor="system")
         app.state.retention_task = asyncio.create_task(adminmod.retention_loop(engine, store))
+        app.state.health_task = asyncio.create_task(health_loop())
 
     @app.on_event("shutdown")
     async def _shutdown():
-        t = getattr(app.state, "retention_task", None)
-        if t:
-            t.cancel()
+        for name in ("retention_task", "health_task"):
+            t = getattr(app.state, name, None)
+            if t:
+                t.cancel()
         for b in list(app.state.bridges.values()):
             await b.stop()
         await engine.stop()
@@ -278,7 +327,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "home": str(home_dir()),
             "config_path": str(config_path()),
             "role": p["role"],
-            "providers": [_mask(x) for x in cfg.providers],
+            "providers": [_with_health(_mask(x)) for x in cfg.providers],
             "presets": PROVIDER_PRESETS,
             "default": cfg.default.model_dump(),
             "assistants": [a.model_dump() for a in cfg.assistants],
@@ -322,7 +371,14 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     # ------------------------------------------------------------ providers
     @app.get("/api/providers", dependencies=[user_dep])
     async def providers():
-        return [_mask(p) for p in engine.cfg.providers]
+        return [_with_health(_mask(p)) for p in engine.cfg.providers]
+
+    @app.get("/api/providers/health", dependencies=[user_dep])
+    async def providers_health(refresh: int = 0):
+        """Reachability per provider (ok / down / nokey), from the periodic probe or, with refresh=1, checked now."""
+        if refresh:
+            await refresh_health()
+        return {pid: app.state.provider_health.get(pid, {"state": "unknown"}) for pid in (p.id for p in engine.cfg.providers)}
 
     @app.post("/api/providers", dependencies=[admin_dep])
     async def upsert_provider(body: dict):
@@ -370,10 +426,14 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     @app.post("/api/providers/test", dependencies=[admin_dep])
     async def test_provider(body: dict):
         existing = engine.cfg.provider(body.get("id", ""))
-        if existing is not None and (not body.get("api_key") or "…" in str(body.get("api_key"))):
-            body["api_key"] = existing.api_key
-        if existing is not None and (not body.get("password") or "…" in str(body.get("password"))):
-            body["password"] = existing.password
+        if existing is not None:
+            # a partial body (just the id, or a changed field) is tested on top of the saved provider, so the saved
+            # key is never sent to a default base URL it does not belong to
+            if not body.get("api_key") or "…" in str(body.get("api_key")):
+                body["api_key"] = existing.api_key
+            if not body.get("password") or "…" in str(body.get("password")):
+                body["password"] = existing.password
+            body = {**existing.model_dump(), **body}
         body.pop("has_key", None)
         body.pop("has_password", None)
         pc = ProviderConfig.model_validate(body)
@@ -675,8 +735,20 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
         async def producer():
             try:
+                used_pid, got_text, err = "", False, ""
                 async for ev in engine.run_turn(req):
                     await ts.push(ev)
+                    et = ev.get("type")
+                    if et == "message" and (ev.get("message") or {}).get("role") == "assistant":
+                        used_pid = ((ev["message"].get("meta") or {}).get("provider")) or used_pid
+                    elif et == "text_delta" or et == "tool_call":
+                        got_text = True
+                    elif et == "error":
+                        err = str(ev.get("message", ""))
+                if used_pid and got_text:
+                    _note_health(used_pid, "ok")
+                elif used_pid and err and (re.search(r"\b5\d\d\b|Connect|timed out|timeout|RemoteProtocol|ReadError", err)):
+                    _note_health(used_pid, "down", err)
             except asyncio.CancelledError:
                 await ts.push({"type": "done", "finish_reason": "cancelled"})
             except Exception as e:  # pragma: no cover

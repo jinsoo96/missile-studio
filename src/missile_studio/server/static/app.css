@@ -77,6 +77,12 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .chip.primary { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); background: var(--primary-soft); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); display: inline-block; flex: none; }
 .dot.ok { background: var(--success); } .dot.err { background: var(--destructive); } .dot.warn { background: var(--warning); }
+/* provider reachability: a tiny dot on the model pill / composer button, dimmed rows for models that cannot answer right now */
+.hdot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); display: inline-block; flex: none; }
+.hdot.ok { background: var(--success); } .hdot.down { background: var(--destructive); } .hdot.nokey { background: var(--warning); }
+.menu .mitem.dim, .picker.dim .name, .composer .bar .modelbtn.dim { opacity: .45; }
+.menu .mitem.dim .truncate { text-decoration: line-through; text-decoration-color: var(--fg-3); }
+.picker.dim, .composer .bar .modelbtn.dim { border-style: dashed; }
 .kbd { font: 11px var(--mono); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; color: var(--fg-muted); background: var(--card); }
 
 /* ---------- shell ---------- */

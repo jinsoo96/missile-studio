@@ -212,3 +212,21 @@ def test_brand_files_are_served(client):
     assert client.get("/static/brand/avatar.png").status_code == 200
     assert client.get("/static/brand/apple-touch-icon.png").status_code == 200
     assert 'rel="icon"' in client.get("/").text and "brand/avatar.png" in client.get("/static/icons.js").text
+
+
+def test_provider_test_with_partial_body_uses_saved_settings(client):
+    """`{"id": ...}` alone tests the saved provider: its base_url and kind come along with the key, so the key is
+    never sent to the default OpenAI address."""
+    client.post("/api/providers", json={"id": "vl", "kind": "openai", "base_url": "http://127.0.0.1:1/v1", "api_key": "vl-secret-key-0001", "models": ["m"], "default_model": "m"}, headers=H)
+    seen = {}
+
+    async def fake_test(pc):
+        seen.update({"base_url": pc.base_url, "kind": pc.kind, "key": pc.api_key})
+        return {"ok": True, "models": [], "count": 0, "ms": 1}
+
+    client.app.state.engine.test_provider = fake_test
+    assert client.post("/api/providers/test", json={"id": "vl"}, headers=H).json()["ok"]
+    assert seen == {"base_url": "http://127.0.0.1:1/v1", "kind": "openai", "key": "vl-secret-key-0001"}
+    # a masked key in the body still means "the saved one", and a changed field is tested as changed
+    client.post("/api/providers/test", json={"id": "vl", "api_key": "vl-s…0001", "base_url": "http://127.0.0.1:2/v1"}, headers=H)
+    assert seen == {"base_url": "http://127.0.0.1:2/v1", "kind": "openai", "key": "vl-secret-key-0001"}

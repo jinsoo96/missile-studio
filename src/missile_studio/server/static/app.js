@@ -19,6 +19,11 @@
   const hue = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
   const avatarStyle = (s) => `background: hsl(${hue(s)} 55% 48%)`;
   const shortModel = (m) => (m || '').includes('|') ? m.split('|')[1] : m || '';
+  // provider reachability (probed by the server every 2 minutes and after every turn): ok · down · nokey · unknown
+  const HEALTH_LABEL = { ok: 'reachable', down: 'unreachable', nokey: 'no API key', unknown: 'not checked yet' };
+  const healthOf = (p) => (p && p.health) || { state: 'unknown', error: '' };
+  const hdot = (p) => { const h = healthOf(p); return el('span', { class: 'hdot ' + h.state, title: `${p?.label || p?.id || ''}: ${HEALTH_LABEL[h.state] || h.state}${h.error ? ' · ' + h.error : ''}${h.ms ? ' · ' + h.ms + 'ms' : ''}` }); };
+  const unusable = (p) => ['down', 'nokey'].includes(healthOf(p).state);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const hl = (snippet) => esc(snippet).replace(/\[([^\]]{1,80})\]/g, '<mark>$1</mark>');  // the search API marks hits with [ ]
   const MAX_PANES = 3;
@@ -54,7 +59,7 @@
       list.innerHTML = ''; const ql = q.toLowerCase();
       for (const it of ranked(ql)) {
         if (it.group) { if (!q) list.append(el('div', { class: 'mgroup' }, it.group)); continue; }
-        list.append(el('div', { class: 'mitem' + (it.selected ? ' sel' : ''), onclick: () => { m.remove(); onPick(it); } }, it.icon ? I(it.icon, 'sm') : null, el('span', { class: 'truncate' }, it.label), it.sub ? el('span', { class: 'sub' }, it.sub) : null, it.selected ? I('check', 'sm') : null));
+        list.append(el('div', { class: 'mitem' + (it.selected ? ' sel' : '') + (it.dim ? ' dim' : ''), title: it.title || '', onclick: () => { m.remove(); onPick(it); } }, it.icon ? I(it.icon, 'sm') : null, el('span', { class: 'truncate' }, it.label), it.sub ? el('span', { class: 'sub' }, it.sub) : null, it.selected ? I('check', 'sm') : null));
       }
       if (!list.children.length) list.append(el('div', { class: 'mitem muted' }, 'no matches'));
     };
@@ -257,7 +262,7 @@
   function modelPicker(pane) {
     const t = targetOf(pane);
     const preset = presetOf(pane, t);
-    const pill = el('button', { class: 'picker', title: 'Choose model: quick presets first, then every model' }, el('span', { class: 'pv' }, preset ? preset.label : (t.provider?.label || t.pid || 'no provider').split(' ')[0]), el('span', { class: 'name truncate' }, shortModel(t.model) || 'pick a model'), I('chevron', 'xs'));
+    const pill = el('button', { class: 'picker' + (unusable(t.provider) ? ' dim' : ''), title: 'Choose model: quick presets first, then every model' }, el('span', { class: 'pv' }, preset ? preset.label : (t.provider?.label || t.pid || 'no provider').split(' ')[0]), el('span', { class: 'name truncate' }, shortModel(t.model) || 'pick a model'), t.provider ? hdot(t.provider) : null, I('chevron', 'xs'));
     pill.addEventListener('click', () => openModelMenu(pane, pill));
     return pill;
   }
@@ -267,13 +272,14 @@
       const items = [];
       if ((S.st.model_presets || []).length) {
         items.push({ group: 'Quick' });
-        for (const p of S.st.model_presets) items.push({ label: `${p.label} · ${shortModel(p.model)}`, sub: `${providerOf(p.provider)?.label || p.provider}${p.thinking ? ' · ' + THINK_LABEL[p.thinking] : ''}`, icon: p.id === 'fast' ? 'activity' : p.id === 'best' ? 'sparkles' : 'brain', pid: p.provider, model: p.model, thinking: p.thinking, presetId: p.id, selected: preset && preset.id === p.id });
+        for (const p of S.st.model_presets) { const pp = providerOf(p.provider); const h = healthOf(pp); items.push({ label: `${p.label} · ${shortModel(p.model)}`, sub: `${pp?.label || p.provider}${p.thinking ? ' · ' + THINK_LABEL[p.thinking] : ''}${unusable(pp) ? ' · ' + HEALTH_LABEL[h.state] : ''}`, icon: p.id === 'fast' ? 'activity' : p.id === 'best' ? 'sparkles' : 'brain', pid: p.provider, model: p.model, thinking: p.thinking, presetId: p.id, selected: preset && preset.id === p.id, dim: unusable(pp), title: h.error || '' }); }
       }
       for (const p of S.st.providers) {
         const models = [...new Set([p.default_model, ...(p.models || [])].filter(Boolean))];
-        items.push({ group: p.label || p.id });
-        if (!models.length) items.push({ label: '(no models: Discover in Settings)', sub: p.id, pid: p.id, model: '' });
-        for (const m of models.slice(0, 400)) items.push({ label: shortModel(m), sub: p.id, pid: p.id, model: m, selected: !preset && p.id === t.pid && m === t.model });
+        const h = healthOf(p); const bad = unusable(p);
+        items.push({ group: (p.label || p.id) + (bad ? ` · ${HEALTH_LABEL[h.state]}` : '') });
+        if (!models.length) items.push({ label: '(no models: Discover in Settings)', sub: p.id, pid: p.id, model: '', dim: bad });
+        for (const m of models.slice(0, 400)) items.push({ label: shortModel(m), sub: p.id + (bad ? ' · ' + HEALTH_LABEL[h.state] : ''), pid: p.id, model: m, selected: !preset && p.id === t.pid && m === t.model, dim: bad, title: h.error || '' });
       }
       if (!items.length) items.push({ label: 'Add a provider in Settings', sub: '', pid: '', model: '' });
       menu(anchor, items, { searchable: true, onPick: (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } applyTarget(pane, it.pid, it.model, it.thinking, it.presetId); } });
@@ -445,7 +451,7 @@
     });
     box.append(ta);
     const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { for (const f of e.target.files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } e.target.value = ''; renderPills(); } });
-    const modelBtn = el('button', { class: 'btn quiet sm modelbtn', title: 'Change model (same menu as the pill in the top bar)' }, el('span', { class: 'truncate' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : 'pick a model'), I('chevron', 'xs'));
+    const modelBtn = el('button', { class: 'btn quiet sm modelbtn' + (unusable(t.provider) ? ' dim' : ''), title: 'Change model (same menu as the pill in the top bar)' }, el('span', { class: 'truncate' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : 'pick a model'), t.provider ? hdot(t.provider) : null, I('chevron', 'xs'));
     modelBtn.addEventListener('click', () => openModelMenu(pane, modelBtn));
     const researchBtn = el('button', { class: 'btn quiet sm' + (pane.sel.research ? ' on' : ''), title: 'Research mode: plan searches, read sources, write a cited report (more tool rounds)', onclick: () => { pane.sel.research = !pane.sel.research; render(); } }, I('globe', 'sm'), 'Research');
     const kbBtn = el('button', { class: 'btn quiet sm' + (pane.sel.knowledge ? ' on' : ''), title: 'Knowledge: put matching excerpts from your indexed folders into context for each message', onclick: () => { pane.sel.knowledge = !pane.sel.knowledge; render(); } }, I('box', 'sm'), 'Knowledge');
@@ -588,6 +594,8 @@
       }
     }
   }
+  // provider reachability: refresh the dots and dimming once a minute (no re-render while someone is typing or a turn streams)
+  setInterval(async () => { if (!S.st) return; try { const h = await api('/api/providers/health'); let changed = false; for (const p of S.st.providers) { const n = h[p.id]; if (n && (p.health?.state !== n.state || p.health?.error !== n.error)) { p.health = n; changed = true; } } if (changed && S.view === 'chat' && !Object.keys(S.live).length && !/TEXTAREA|INPUT/.test(document.activeElement?.tagName || '')) render(); } catch {} }, 60000);
   setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } for (const p of S.panes) { const c = S.convs.find((x) => x.id === p.convId); if (c && c.running && !S.live[p.convId]) attachStream(p, p.convId); } } catch {} }, 6000);
   // a deployed update: when the server's version no longer matches the assets this tab loaded, reload (between turns) so nobody keeps an old UI
   const LOADED_VERSION = (document.querySelector('script[src*="app.js"]')?.getAttribute('src') || '').split('v=')[1] || '';
@@ -823,7 +831,7 @@
     const list = el('div', { class: 'listbox' });
     const selId = S.sel.providerId && providerOf(S.sel.providerId) ? S.sel.providerId : (S.st.providers[0]?.id || '');
     list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: addProviderModal }, I('plus', 'sm'), 'Add provider')));
-    for (const p of S.st.providers) list.append(el('div', { class: 'lrow' + (p.id === selId ? ' active' : ''), onclick: () => { S.sel.providerId = p.id; render(); } }, el('div', { class: 'em', style: avatarStyle(p.id) }, initials(p.label || p.id)), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, p.label || p.id), el('div', { class: 'sub truncate' }, `${p.kind} · ${p.models.length} models`)), el('span', { class: 'dot ' + (p.enabled === false ? '' : (p.has_key || p.kind === 'agentserver' || /127\.0\.0\.1|localhost/.test(p.base_url) ? 'ok' : 'warn')) })));
+    for (const p of S.st.providers) list.append(el('div', { class: 'lrow' + (p.id === selId ? ' active' : ''), onclick: () => { S.sel.providerId = p.id; render(); } }, el('div', { class: 'em', style: avatarStyle(p.id) }, initials(p.label || p.id)), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, p.label || p.id), el('div', { class: 'sub truncate' }, `${p.kind} · ${p.models.length} models`)), el('span', { class: 'dot ' + (p.enabled === false ? '' : ({ ok: 'ok', down: 'err', nokey: 'warn' }[healthOf(p).state] || (p.has_key || p.kind === 'agentserver' || /127\.0\.0\.1|localhost/.test(p.base_url) ? 'ok' : 'warn'))), title: HEALTH_LABEL[healthOf(p).state] + (healthOf(p).error ? ' · ' + healthOf(p).error : '') })));
     if (!S.st.providers.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px' }, 'No providers yet.'));
     const detail = el('div');
     const p = providerOf(selId);
