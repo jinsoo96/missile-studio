@@ -402,6 +402,7 @@
     let i = 0; let lastUser = null;
     while (i < pane.messages.length) {
       const m = pane.messages[i];
+      if (m.role === 'user' && m.meta?.note) { inner.append(el('div', { class: 'note-line', title: textOf(m) }, I('info', 'xs'), noteText(m.meta))); i++; continue; }
       if (m.role === 'user') {
         lastUser = m;
         const text = textOf(m);
@@ -570,7 +571,7 @@
     if (!convId || S.live[convId]) return false;
     let r; try { r = await fetch(`/api/chat/${convId}/stream?after=0`, { headers: headers() }); } catch { return false; }
     if (!r.ok) return false;
-    const lastUser = [...pane.messages].reverse().find((m) => m.role === 'user');
+    const lastUser = [...pane.messages].reverse().find((m) => m.role === 'user' && !m.meta?.note);
     if (lastUser) pane.messages = pane.messages.slice(0, pane.messages.indexOf(lastUser) + 1);  // the buffer re-renders this turn
     const t = targetOf(pane); const { node, content } = assistantTurn(pane, t.model);
     const live = { convId, node, userNode: null, content, abort: new AbortController(), textBuf: '', thinkBuf: '', mdEl: null, thinkEl: null, statusEl: null, cards: {}, attached: true };
@@ -611,6 +612,7 @@
           else if (ev.event === 'compacting') status('long thread: compacting the earlier part into a summary…', true);
           else if (ev.event === 'compacted') status(`history compacted · ${d.kept} recent messages kept verbatim`);
           else if (ev.event === 'tool_catalog') status(`tool catalog: ${(d.loaded || []).length} of ${d.total} tools defined · the model loads the rest as needed`);
+          else if (ev.event === 'tool_call_not_run') status(noteText(d) + (d.retry ? ' · asked the model to send it again' : ' · not retried again'), true);
           else if (ev.event === 'tools_loaded') status(`loaded tools: ${(d.names || []).map((n) => n.split('__').pop()).join(', ')}`);
           else if (ev.event === 'knowledge') status(`${(d.hits || []).length} knowledge excerpts in context${d.auto ? ' (automatic)' : ''}: ${(d.hits || []).map((h) => baseName(h.path)).slice(0, 4).join(', ')}`);
           else if (ev.event === 'max_iterations') status('tool-call limit reached — answering with what it found', true);
@@ -627,6 +629,8 @@
   // provider reachability: the server already marks a provider down the moment a live turn fails (no regex
   // gate, any provider-level error counts), so refreshHealth() just needs to run soon after. endLive() calls
   // it with force=true right when a turn ends; the 60s interval is only the floor for an otherwise idle screen.
+  // a tool call the model wrote as text that did not run (untagged, unreadable, or cut off at the output limit)
+  const noteText = (d) => { const n = d.name ? d.name.split('__').pop() : 'a tool'; return d.reason === 'cut_off' ? `call to ${n} was cut off at the output limit and did not run` : d.reason === 'malformed' ? `a tool call could not be read and did not run` : `call to ${n} was written as text and did not run`; };
   // wake jobs (MCP Restart with a wake command, e.g. bringing a GPU server up): progress, remaining time, reconnect
   const wakeActive = (j) => j && (j.state === 'running' || j.state === 'reconnecting');
   const fmtLeft = (s) => s == null || s <= 0 ? '' : s < 60 ? `about ${Math.round(s)} s left` : `about ${Math.round(s / 60)} min left`;

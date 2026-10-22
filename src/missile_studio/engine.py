@@ -175,6 +175,7 @@ class ToolCallScanner:
     def __init__(self) -> None:
         self.buf = ""
         self.calls: list[dict] = []
+        self.rejected = 0  # <tool_call> blocks whose content was not a readable call (shown as text instead)
 
     def feed(self, delta: str) -> str:
         self.buf += delta
@@ -194,11 +195,15 @@ class ToolCallScanner:
             inner = self.buf[i + len(TOOL_CALL_OPEN) : j]
             self.buf = self.buf[j + len(TOOL_CALL_CLOSE) :]
             if not self._add(inner):
+                self.rejected += 1
                 out += inner  # not a call after all: show it
 
     def flush(self) -> str:
-        if self.buf.startswith(TOOL_CALL_OPEN) and self._add(self.buf[len(TOOL_CALL_OPEN) :]):
-            self.buf = ""
+        if self.buf.startswith(TOOL_CALL_OPEN):
+            if self._add(self.buf[len(TOOL_CALL_OPEN) :]):
+                self.buf = ""
+            else:
+                self.rejected += 1
         out, self.buf = self.buf, ""
         return out
 
@@ -301,14 +306,64 @@ def _fit_messages(messages: list[dict], limit: int, force: bool = False) -> tupl
 
 
 def _is_turn_start(m: dict) -> bool:
-    """A real user message (not a tool response, not the image follow-up the engine adds after a tool)."""
+    """A real user message (not a tool response, not the image follow-up or a studio note the engine adds)."""
     if m.get("role") != "user" or _is_tool_result(m):
         return False
     c = m.get("content")
     if isinstance(c, list):
         first = next((p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text"), "")
         return not first.startswith("(image returned by")
-    return not str(c or "").startswith("(an image shown earlier")
+    return not str(c or "").startswith(("(an image shown earlier", NOTE_PREFIX))
+
+
+# ---------------------------------------------------------------- tool calls written as text (did not run)
+NOTE_PREFIX = "(note from the studio: "
+STRAY_NUDGES = 2  # times one turn asks the model to send a call it wrote as text again
+_STRAY_CALL = re.compile(r'\{\s*"(?:name|tool|function)"\s*:\s*"([^"\n]{1,120})"\s*,\s*"(?:arguments|parameters|args|input)"\s*:')
+
+
+def _stray_tool_call(text: str, tools: list, finish: str, prompt_mode: bool, rejected_tags: int = 0) -> Optional[dict]:
+    """A tool call the model wrote in its text that never ran. Returns {"name", "reason"} or None.
+    reason: cut_off (the output limit hit inside a call) · malformed (prompt mode: <tool_call> tags whose content is
+    not a readable call) · as_text (a call object naming a known tool, written as text instead of as a call).
+    Only a known tool name counts, so prose and other JSON in an answer are left alone."""
+    if not text or not tools:
+        return None
+    full = {t.full_name for t in tools}
+    by_bare: dict[str, list[str]] = {}
+    for t in tools:
+        by_bare.setdefault(t.name, []).append(t.full_name)
+
+    def known(n: str) -> str:
+        n = n.strip()
+        if n in full:
+            return n
+        hits = by_bare.get(n) or []
+        return hits[0] if len(hits) == 1 else ""
+
+    name = next((k for k in (known(m.group(1)) for m in _STRAY_CALL.finditer(text)) if k), "")
+    tagged = TOOL_CALL_OPEN in text or rejected_tags > 0
+    if finish == "length" and (name or tagged):
+        return {"name": name, "reason": "cut_off"}
+    if tagged and prompt_mode:
+        return {"name": name, "reason": "malformed"}
+    if name or tagged:
+        return {"name": name, "reason": "as_text"}
+    return None
+
+
+def _stray_nudge(stray: dict, prompt_mode: bool) -> str:
+    name = stray.get("name") or "a tool"
+    if stray["reason"] == "cut_off":
+        return (f"your last message was cut off by the output limit in the middle of a call to {name}, so nothing ran. "
+                "Make the call again with shorter arguments; split long content across several calls")
+    if prompt_mode:
+        how = (f'output it again as {TOOL_CALL_OPEN}{{"name": "{stray.get("name") or "<tool name>"}", "arguments": {{...}}}}{TOOL_CALL_CLOSE} '
+               "with valid JSON and nothing else inside the tags")
+    else:
+        how = "call the tool through function calling instead of writing the call out as text"
+    what = "a tool call that could not be read" if stray["reason"] == "malformed" else f"a call to {name} written as text"
+    return f"your last message contained {what}, so it did not run. If you meant to run it, {how}. If it was only an example, say so briefly and finish"
 
 
 def _call_names(m: dict) -> list[tuple[str, str]]:
@@ -945,6 +1000,7 @@ class Engine:
         iterations = 0
         pending: dict[str, dict] = {}  # tool calls of the current assistant message that have no result yet
         seen_calls: dict[str, int] = {}  # (tool + args) -> how many times this turn, to catch a polling loop
+        stray_nudges = 0  # times this turn the model was asked to resend a call it wrote as text
         try:
             for iterations in range(1, max_iter + 1):
                 text_parts: list[str] = []
@@ -1069,6 +1125,20 @@ class Engine:
                     yield {"type": "message", "message": assistant_msg}
                 messages.append(_promptify([_strip(assistant_msg)])[0] if prompt_tools else _strip(assistant_msg))
                 pending = {c["id"]: c for c in calls}
+                if not had_error and not calls:
+                    # the answer may hold a tool call that never ran: written as text, untagged, or cut off at the
+                    # output limit. Say so, and ask the model once or twice to send it properly instead of ending here.
+                    stray = _stray_tool_call(assistant_msg["content"], tools + ([LOAD_TOOLS] if catalog_on else []), finish, prompt_tools, scanner.rejected if scanner is not None else 0)
+                    if stray:
+                        retry = stray_nudges < STRAY_NUDGES
+                        yield {"type": "status", "event": "tool_call_not_run", "data": {**stray, "retry": retry}}
+                        if retry:
+                            stray_nudges += 1
+                            note = {"role": "user", "content": NOTE_PREFIX + _stray_nudge(stray, prompt_tools) + ")", "meta": {"note": "tool_call_not_run", **stray}}
+                            self.store.append_message(req.conversation_id, note)
+                            yield {"type": "message", "message": note}
+                            messages.append(_strip(note))
+                            continue
                 if had_error or not calls:
                     # a stream that failed after announcing tool calls: close them, or the next turn's history is invalid
                     for tm in self._close_pending(req.conversation_id, pending, "skipped: the model stream ended with an error before this tool ran"):
@@ -1087,6 +1157,11 @@ class Engine:
                     args = c.get("arguments") or {}
                     if tool is None:
                         plan.append((c, None, "block", "unknown tool"))
+                        continue
+                    if isinstance(args, dict) and set(args) == {"_raw"}:
+                        # the arguments were not readable JSON (usually cut off at the output limit): running the tool
+                        # with them would act on half an input, so it does not run and the model is told why
+                        plan.append((c, tool, "schema", json.dumps({"error": "the arguments were not valid JSON (probably cut off by the output limit), so the tool was not run; call it again with shorter arguments, splitting long content across several calls", "received": str(args["_raw"])[:300], "input_schema": _compact_schema(tool.input_schema)}, ensure_ascii=False)))
                         continue
                     if catalog_on and tool is not LOAD_TOOLS and tool.full_name not in loaded:
                         loaded.add(tool.full_name)  # called straight from the catalog: defined from now on
