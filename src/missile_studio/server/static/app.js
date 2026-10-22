@@ -13,6 +13,23 @@
   };
   const I = (name, cls) => window.icon(name, cls);
   const md = (s) => DOMPurify.sanitize(marked.parse(String(s ?? ''), { breaks: true, gfm: true }));
+  // links in answers open in a new tab (DOMPurify drops target= by default, so it is set after sanitising)
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => { if (node.tagName === 'A' && /^(https?:|mailto:)/i.test(node.getAttribute('href') || '')) { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); } });
+  const URL_RE = /https?:\/\/[^\s"'<>\\)\]]+/g;
+  // plain text (tool results) with its URLs turned into links; built from nodes, never from HTML
+  function linkedPre(text) {
+    const pre = el('pre');
+    let last = 0;
+    for (const m of String(text).matchAll(URL_RE)) {
+      let url = m[0]; let tail = '';
+      while (/[.,;:!?]$/.test(url)) { tail = url.slice(-1) + tail; url = url.slice(0, -1); }
+      pre.append(document.createTextNode(text.slice(last, m.index)), el('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, url));
+      if (tail) pre.append(document.createTextNode(tail));
+      last = m.index + m[0].length;
+    }
+    pre.append(document.createTextNode(text.slice(last)));
+    return pre;
+  }
   const fmtMs = (ms) => ms == null ? '' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
   const fmtBytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
   const initials = (s) => (s || '?').replace(/[^a-z0-9]/gi, '').slice(0, 2).toUpperCase() || '?';
@@ -325,7 +342,7 @@
     const body = el('div', { class: 'tbody' });
     const args = JSON.stringify(call.arguments ?? {}, null, 1);
     body.append(el('div', { class: 'lbl' }, 'arguments'), el('pre', {}, args.length > 2000 ? args.slice(0, 2000) + '…' : args));
-    if (result) { body.append(el('div', { class: 'lbl' }, 'result'), el('pre', {}, String(result.text || result.content || '').slice(0, 6000))); for (const im of result.images || []) body.append(el('img', { src: `data:${im.mime_type || 'image/png'};base64,${im.data}` })); }
+    if (result) { body.append(el('div', { class: 'lbl' }, 'result'), linkedPre(String(result.text || result.content || '').slice(0, 6000))); for (const im of result.images || []) body.append(el('img', { src: `data:${im.mime_type || 'image/png'};base64,${im.data}` })); }
     // a file the agent just wrote into the workspace can be taken straight from the card
     if (result && !result.is_error && call.name === 'local__write_file' && call.arguments?.path) body.append(el('a', { class: 'btn sm', style: 'margin-top:8px;display:inline-flex', href: downloadUrl(call.arguments.path), download: baseName(call.arguments.path) }, I('download', 'sm'), 'Download ' + baseName(call.arguments.path)));
     d.append(body);
@@ -804,7 +821,7 @@
     view.append(el('div', { class: 'ahead' }, el('button', { class: 'btn quiet icon sm', title: 'all artifacts', onclick: () => { D.artifact = null; swap(); } }, I('chevronR', 'sm')), el('span', { class: 'mono truncate', style: 'max-width:160px' }, a.name), el('span', { class: 'muted' }, `${a.lang || 'text'} · ${a.lines} lines`), el('span', { class: 'spacer' }), tabs, el('button', { class: 'btn quiet icon sm', title: 'Copy', onclick: () => navigator.clipboard.writeText(a.code).then(() => toast('copied')) }, I('copy', 'sm')), el('button', { class: 'btn sm', title: 'Download', onclick: () => saveBlob(a.name, a.code) }, I('download', 'sm'), 'Download'), isAdmin() ? el('button', { class: 'btn primary sm', title: 'Save into the workspace folder', onclick: () => saveArtifact(a.id) }, I('file', 'sm'), a.savedPath ? 'Save again' : 'Save') : null, el('button', { class: 'btn sm', title: 'Open in the editor', onclick: () => { D.file = { path: a.savedPath || `artifacts/${a.name}`, content: a.code, saved: a.savedPath ? a.code : '', size: a.code.length, onDisk: !!a.savedPath }; D.tab = 'editor'; D.versions = null; redrawDrawer(); } }, I('edit', 'sm'))));
     const body = el('div', { class: 'abody' });
     if (canPreview && D.aTab !== 'code') {
-      if (a.lang === 'html') { const fr = el('iframe', { sandbox: 'allow-scripts', title: a.name }); fr.srcdoc = a.code; body.style.display = 'flex'; body.append(fr); }
+      if (a.lang === 'html') { const fr = el('iframe', { sandbox: 'allow-scripts allow-popups allow-popups-to-escape-sandbox', title: a.name }); fr.srcdoc = a.code; body.style.display = 'flex'; body.append(fr); }
       else if (a.lang === 'svg') body.append(el('div', { style: 'padding:14px', html: DOMPurify.sanitize(a.code, { USE_PROFILES: { svg: true, svgFilters: true } }) }));
       else if (a.lang === 'json') { let pretty = a.code; try { pretty = JSON.stringify(JSON.parse(a.code), null, 2); } catch {} body.append(el('pre', {}, pretty)); }
       else body.append(el('div', { class: 'md', html: md(a.code) }));
