@@ -270,7 +270,8 @@ class TurnRequest:
     thinking: str = ""  # "" | off | on | max
     style_id: str = ""
     mode: str = ""  # "" | research (plan searches, read sources, write a cited report; more iterations)
-    knowledge: bool = False  # retrieve knowledge-base excerpts for this message and put them in context
+    knowledge: bool = False  # force knowledge-base excerpts for this message (otherwise automatic when a knowledge base exists)
+    permission: str = ""  # "" | ask | auto | readonly (the chat's permission mode, see Engine.decide)
 
 
 RESEARCH_PROMPT = (
@@ -280,6 +281,12 @@ RESEARCH_PROMPT = (
     "a short conclusion first, then findings with inline citations like [1], [2] pointing to a numbered "
     "Sources list at the end (title and URL). Say plainly where sources disagree or evidence is thin. "
     "Do not stop after one search."
+)
+RESEARCH_HINT = (
+    "When a good answer needs facts you are not sure of or that may have changed (news, prices, versions, "
+    "documentation, people, places, schedules), look them up before answering: run web_search with two or three "
+    "differently worded queries, open the best pages with fetch_url, and cite the sources (title and URL). "
+    "Otherwise answer directly."
 )
 SUMMARY_PROMPT = (
     "You compress conversation history for an assistant that will continue the chat. Write a dense summary that "
@@ -425,16 +432,25 @@ class Engine:
             return out
         return allt
 
-    def decide(self, tool: ToolInfo, arguments: dict, conversation_id: str, allow_dangerous: bool = False) -> tuple[str, str]:
-        """Return (decision, reason). decision in allow|ask|block."""
+    def decide(self, tool: ToolInfo, arguments: dict, conversation_id: str, allow_dangerous: bool = False, permission: str = "") -> tuple[str, str]:
+        """Return (decision, reason). decision in allow|ask|block.
+        ``permission`` is the chat's mode: "" / "ask" = the policy decides, "auto" = run everything (blocked tools and
+        dangerous shell commands still stop), "readonly" = only read-only tools, the rest is off."""
         pol = self.cfg.tool_policy
+        rule = match_rule(tool.full_name, pol.rules) or match_rule(f"{tool.server}{SEP}*", pol.rules)
+        if rule == "block":
+            return "block", f"policy rule for {tool.full_name}"
         if tool.full_name in self.session_allow.get(conversation_id, set()):
             return "allow", "allowed for this conversation"
-        if tool.server == LOCAL and tool.name == "run_shell":
-            cmd = str(arguments.get("command", ""))
-            if is_dangerous_command(cmd) and not allow_dangerous:
-                return "ask", "command matches a dangerous pattern"
-        rule = match_rule(tool.full_name, pol.rules) or match_rule(f"{tool.server}{SEP}*", pol.rules)
+        dangerous = tool.server == LOCAL and tool.name == "run_shell" and is_dangerous_command(str(arguments.get("command", "")))
+        if permission == "readonly":
+            if tool.read_only and not tool.destructive and not dangerous:
+                return "allow", "read-only mode: read-only tool"
+            return "block", "read-only mode for this chat: tools that write or run things are off"
+        if dangerous and not allow_dangerous:
+            return "ask", "command matches a dangerous pattern"
+        if permission == "auto":
+            return "allow", "allow-all mode for this chat"
         if rule:
             return rule, f"policy rule for {tool.full_name}"
         if tool.read_only and not tool.destructive:
@@ -648,13 +664,18 @@ class Engine:
             mems = self.store.search_memories(req.user_text, self.cfg.memory.recall_k)
             if mems:
                 system += "\n\nThings remembered about the user from earlier chats (use when relevant, do not recite them):\n" + "\n".join(f"- {m['text']}" for m in mems)
-        if req.knowledge and self.knowledge is not None:
-            hits = await self.knowledge.search(req.user_text, self.cfg.knowledge.top_k)
+        # knowledge: forced for this message, or automatic whenever a knowledge base exists (fewer, shorter excerpts then)
+        auto_kb = not req.knowledge and self.cfg.knowledge.auto and len(req.user_text.strip()) >= 8 and self.store.kb_stats()["chunks"] > 0
+        if (req.knowledge or auto_kb) and self.knowledge is not None:
+            k, width = (self.cfg.knowledge.top_k, 1500) if req.knowledge else (min(self.cfg.knowledge.top_k, 3), 800)
+            hits = await self.knowledge.search(req.user_text, k)
             if hits:
-                system += "\n\nExcerpts from the user's knowledge base (cite the path when you rely on one):\n" + "\n".join(f"[{i + 1}] {h['path']} (chunk {h['idx']}):\n{h['text'][:1500]}" for i, h in enumerate(hits))
-                yield {"type": "status", "event": "knowledge", "data": {"hits": [{"path": h["path"], "idx": h["idx"]} for h in hits]}}
+                system += "\n\nExcerpts from the user's knowledge base (use only what is relevant; cite the path when you rely on one):\n" + "\n".join(f"[{i + 1}] {h['path']} (chunk {h['idx']}):\n{h['text'][:width]}" for i, h in enumerate(hits))
+                yield {"type": "status", "event": "knowledge", "data": {"hits": [{"path": h["path"], "idx": h["idx"]} for h in hits], "auto": auto_kb}}
         if req.mode == "research":
             system += "\n\n" + RESEARCH_PROMPT
+        elif any(t.full_name == f"{LOCAL}{SEP}web_search" for t in tools):
+            system += "\n\n" + RESEARCH_HINT  # the model decides when a question needs a look-up
         prompt_tools = bool(tools) and bool(getattr(pcfg, "tools_via_prompt", False))
         system_base = system
 
@@ -818,11 +839,11 @@ class Engine:
                         tool = same[0] if len(same) == 1 else None
                     args = c.get("arguments") or {}
                     if tool is None:
-                        plan.append((c, None, "block"))
+                        plan.append((c, None, "block", "unknown tool"))
                         continue
                     if catalog_on and tool is not LOAD_TOOLS and tool.full_name not in loaded:
                         loaded.add(tool.full_name)  # called straight from the catalog: fine, and defined from now on
-                    decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous)
+                    decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous, req.permission)
                     if decision == "ask":
                         yield {"type": "approval_required", "id": c["id"], "name": c["name"], "arguments": args, "reason": reason}
                         answer = await self.approvals.ask(req.conversation_id, c["id"], c["name"], args, reason)
@@ -837,9 +858,9 @@ class Engine:
                             decision = "allow"
                         else:
                             decision = "deny"
-                    plan.append((c, tool, decision))
+                    plan.append((c, tool, decision, reason))
 
-                async def run_one(c: dict, tool: Any, decision: str) -> tuple[dict, str, dict, int]:
+                async def run_one(c: dict, tool: Any, decision: str, reason: str = "") -> tuple[dict, str, dict, int]:
                     t0 = time.time()
                     if tool is None:
                         result = {"text": f"unknown tool {c['name']}", "is_error": True, "content": []}
@@ -854,16 +875,16 @@ class Engine:
                         except Exception as e:
                             result = {"text": f"{type(e).__name__}: {e}", "is_error": True, "content": []}
                     elif decision == "block":
-                        result = {"text": f"tool {c['name']} is blocked by policy", "is_error": True, "content": []}
+                        result = {"text": f"tool {c['name']} is blocked: {reason or 'policy'}", "is_error": True, "content": []}
                     else:
                         result = {"text": f"tool {c['name']} was denied by the user", "is_error": True, "content": []}
                     return c, decision, result, int((time.time() - t0) * 1000)
 
                 sem = asyncio.Semaphore(PARALLEL_TOOLS)
 
-                async def guarded(c: dict, tool: Any, decision: str) -> tuple[dict, str, dict, int]:
+                async def guarded(c: dict, tool: Any, decision: str, reason: str = "") -> tuple[dict, str, dict, int]:
                     async with sem:
-                        return await run_one(c, tool, decision)
+                        return await run_one(c, tool, decision, reason)
 
                 tool_tasks: list[asyncio.Task] = [asyncio.create_task(guarded(*p)) for p in plan] if len(plan) > 1 else []
                 try:

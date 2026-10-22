@@ -154,7 +154,8 @@ class ChatIn(BaseModel):
     style_id: str = ""
     branch_from: str = ""  # id of the user message being edited: the new message becomes its sibling
     mode: str = ""  # "" | research
-    knowledge: bool = False  # put knowledge-base excerpts for this message into context
+    knowledge: bool = False  # force knowledge-base excerpts for this message (automatic otherwise)
+    permission: str = ""  # "" | ask | auto | readonly: the chat's permission mode
 
 
 class HeadIn(BaseModel):
@@ -630,6 +631,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         embeddings_model: str = ""
         chunk_chars: int = 900
         top_k: int = 6
+        auto: Optional[bool] = None  # retrieve excerpts for every message once something is indexed
 
     @app.get("/api/knowledge", dependencies=[user_dep])
     async def knowledge_status():
@@ -674,6 +676,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         kc = engine.cfg.knowledge
         kc.embeddings_provider, kc.embeddings_model = body.embeddings_provider, body.embeddings_model
         kc.chunk_chars, kc.top_k = max(200, min(body.chunk_chars, 4000)), max(1, min(body.top_k, 20))
+        if body.auto is not None:
+            kc.auto = bool(body.auto)
         engine.save()
         return kc.model_dump()
 
@@ -746,6 +750,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             style_id=body.style_id,
             mode=body.mode,
             knowledge=body.knowledge,
+            permission=body.permission if body.permission in ("ask", "auto", "readonly") else "",
         )
         # The turn runs on the server in its own task and writes to a buffer; the browser only *follows* that
         # buffer. Closing the tab therefore does not stop the turn, and a new tab can reattach and replay.

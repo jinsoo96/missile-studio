@@ -150,6 +150,7 @@ class KnowledgeConfig(BaseModel):
     embeddings_model: str = ""
     chunk_chars: int = 900
     top_k: int = 6
+    auto: bool = True  # retrieve excerpts for every message once something is indexed (the composer no longer needs a switch)
     extensions: list[str] = Field(default_factory=lambda: [".md", ".txt", ".markdown", ".rst", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".pdf"])
 
 
