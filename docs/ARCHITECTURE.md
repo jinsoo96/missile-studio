@@ -25,6 +25,10 @@ Why: one vocabulary keeps every surface identical and makes adding a provider a 
 - `gemini.py`: `streamGenerateContent?alt=sse`; strips JSON-schema keywords Gemini rejects;
   groups `functionResponse` parts; `thought` parts → thinking.
 - `agentserver.py`: remote agent servers (see GUIDE-agent-server.md). The "model" is an agent id.
+- `probe.py`: turns a pasted endpoint into `(kind, base_url)` candidates. Request paths
+  (`/chat/completions`, `/v1/messages`, `/models` …) are cut off, a bare host is tried with `/v1`
+  first, and Anthropic or Gemini hosts pick their own adapter. `POST /api/providers/probe` keeps the
+  first candidate that lists models and returns every attempt, so a failure says what was tried.
 
 ## MCP manager
 
@@ -51,6 +55,44 @@ Policy order: per-conversation session allow → dangerous shell pattern (always
 
 Approvals are futures keyed by call id. The web UI resolves them through `POST /api/approvals/{id}`;
 the terminal resolves them inline; non-interactive `missile ask` denies. Timeout 10 minutes → deny.
+A chat's permission mode (Ask / Allow all / Read-only) is applied on top: Allow all skips the `ask`
+pause (blocked tools and dangerous shell commands still stop), Read-only offers read-only tools only.
+
+## Harness: small models and long runs
+
+The same loop serves a hosted frontier model and a 16k-context model on a rented GPU, so it carries
+the guard rails a weaker model needs:
+
+- **Throughput and failures.** Tool calls of one turn run concurrently (4 at a time; approvals still
+  one by one). Provider errors before any output (429, 5xx, connection) are retried with backoff.
+  Anthropic requests cache the system prompt and tool list and replay thinking blocks with their
+  signatures, so extended thinking survives tool loops.
+- **Tools without a tool parser.** A server that rejects tool definitions (vLLM without
+  `--enable-auto-tool-choice`) is switched to tool calls through the prompt: tools are described in the
+  system prompt and `<tool_call>{…}</tool_call>` blocks are read from the text.
+- **Many tools, small windows.** Above 24 tools (configurable) the model gets a one-line catalog and
+  loads what it needs with `local__load_tools`; loaded tools stay for the conversation. Token counts are
+  estimated (Korean-aware), tool results are capped for the model, older results and images are shortened
+  before each request, a long tool loop inside one turn is folded into a one-line log of its earlier
+  steps, and a context-length 400 is answered by trimming harder and sending again. Long threads are
+  compacted by the model into a summary that replaces the old part; the recent tail stays verbatim.
+- **Steering a stuck turn.** A turn that repeats the same tool call is nudged to wait (`job_wait`) or
+  conclude; one that reaches the tool-call limit ends with a forced plain-text answer. A tool call the
+  model writes as text (untagged, unreadable, or cut off at the output limit) is reported and the model
+  is asked, at most twice, to send it properly; arguments that arrive as unreadable JSON never run the
+  tool. An answer that stops mid-sentence while tools are in play is continued once.
+- **Why it ended.** Every answer keeps the server's finish reason, its stop reason and its output tokens;
+  the UI shows them on hover and flags an answer that did not end normally.
+
+Notes to the model (the nudges above) are stored as user-role messages marked `meta.note`: the
+conversation stays valid for every provider, and the UI draws them as a quiet line, not a bubble.
+
+## Per-chat settings and the prompt library
+
+`conversations.settings` holds a chat's own instructions, temperature and max output tokens (cleaned on
+the server). The engine appends the instructions after the assistant prompt, marked as taking priority,
+and lets the two numbers override the assistant's. Saved prompts live in `config.prompts`; the composer
+inserts one with `/name` and asks for each `{{blank}}` first.
 
 ## Local tools
 
@@ -70,7 +112,17 @@ command list (`rm -rf`, `Remove-Item -Recurse`, `format`, `dd`, `git push --forc
 
 `config.json` (pydantic models in `config.py`) and `studio.db` (WAL) under `MISSILE_HOME`.
 Provider secrets may be referenced by env var name (`api_key_env`). The UI never receives raw keys
-(masked); sending the masked placeholder back keeps the stored secret.
+(masked); sending the masked placeholder back keeps the stored secret. Columns added after the first
+release (`head_id`, `style_id`, `pinned`, `settings` …) are added on start when missing, so an existing
+database upgrades in place. `tool_audit` is read a page at a time (`/api/audit/page`, filters and a total)
+and exported as CSV (`/api/audit/export`).
+
+## Interface language
+
+Screens are written in English and every visible string goes through `T('…')`, which looks the text up in
+`static/i18n.js` (Korean) and fills `{name}` slots. Static HTML uses `data-i18n` attributes. The choice is
+kept per browser and defaults to the browser's language; dates follow it too. `tests/test_i18n.py` fails
+when a string passed to `T()` has no Korean entry.
 
 ## Concurrent turns, split panes, workspace drawer
 
@@ -103,4 +155,4 @@ land without a hard reload.
 - Non-loopback bind requires a token (auto-generated).
 - Local tools cannot leave the workspace; shell asks on dangerous commands.
 - Hub/bridge never auto-approve `ask` tools without `--trust`.
-- Everything a tool did is in `/api/audit` and the Audit tab.
+- Everything a tool did is in the audit log (`/api/audit/page`, Settings → Audit log).

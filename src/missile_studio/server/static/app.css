@@ -607,3 +607,15 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 :root[data-text="s"] .chat-inner { font-size: 13px; }
 :root[data-text="l"] .chat-inner { font-size: 16px; }
 :root[data-wide="1"] .chat-inner, :root[data-wide="1"] .composer { max-width: 1200px; }
+/* answer footer: wrap between items, never inside one (narrow split panes) */
+.turn-ai .meta { flex-wrap: wrap; row-gap: 2px; }
+.turn-ai .meta > span { white-space: nowrap; }
+/* split view: the context gauge gives its room to the model name */
+.panes .pane-col:not(:only-child) .composer .bar .ctx { display: none; }
+/* the workspace panel uses more of a wide screen; the editor header keeps sizes on one line */
+@media (min-width: 1400px) { .drawer { width: 520px; } }
+.editor .ehead .muted { white-space: nowrap; }
+/* the composer bar fits its pane: the model label shrinks (with an ellipsis), the send button never moves out */
+.composer .bar .modelbtn { flex: 0 1 auto; min-width: 0; }
+.composer .bar .send, .composer .bar .stop { flex: none; }
+.panes .pane-col:not(:only-child) .composer .bar .btn.quiet.sm:not(.modelbtn):not(.icon) { font-size: 0; gap: 0; }

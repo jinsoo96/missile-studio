@@ -4,13 +4,14 @@
   const $ = (s, r = document) => r.querySelector(s);
   const el = (tag, attrs = {}, ...kids) => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) { if (v === undefined || v === null || v === false) continue; if (k === 'class') n.className = v; else if (k === 'html') n.innerHTML = v; else if (k === 'style') n.style.cssText = v; else if (k === 'value') n.value = v; else if (k.startsWith('on')) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? '' : v); } for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) n.append(k.nodeType ? k : document.createTextNode(String(k))); return n; };
   const I = (n, c) => window.icon(n, c);
+  const LOC = () => (i18n.lang === 'ko' ? 'ko-KR' : 'en-US');  // dates and times follow the UI language
   const T = window.T;  // UI text: written in English here, other languages live in i18n.js
   // a translated sentence with elements (code, links) in its {slots}
   const rich = (s, parts) => s.split(/(\{\w+\})/).map((x) => { const k = x.match(/^\{(\w+)\}$/); return k && parts[k[1]] !== undefined ? parts[k[1]] : x; });
   const LANG_NAME = { en: 'English', ko: '한국어' };
   const fmtBytes = (b) => b == null ? '-' : b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
   const fmtDur = (s) => { s = Math.floor(s || 0); const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return d ? T('{d}d {h}h', { d, h }) : h ? T('{h}h {m}m', { h, m }) : T('{m}m {s}s', { m, s: s % 60 }); };
-  const fmtTs = (t) => t ? new Date(t * 1000).toLocaleString() : '-';
+  const fmtTs = (t) => t ? new Date(t * 1000).toLocaleString(LOC()) : '-';
   const fmtMs = (ms) => ms == null ? '' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
   let toastTimer; function toast(msg, isErr) { $('.toast')?.remove(); const t = el('div', { class: 'toast' + (isErr ? ' err' : '') }, msg); document.body.append(t); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.remove(), 3200); }
   function modal({ title, body, footer, wide }) { const bd = el('div', { class: 'backdrop', onclick: (e) => { if (e.target === bd) close(); } }); const m = el('div', { class: 'modal', style: wide ? 'width:min(900px,100%)' : '' }, el('header', {}, el('h3', {}, title), el('span', { class: 'spacer' }), el('button', { class: 'btn quiet icon sm', onclick: () => close() }, I('x', 'sm'))), el('div', { class: 'body' }, body), footer ? el('footer', {}, footer) : null); bd.append(m); $('#layer').append(bd); function close() { bd.remove(); } return { close, root: m }; }

@@ -1,8 +1,9 @@
 # missile studio
 
-**Your own LLM studio.** Many model providers, your local MCP servers and remote agent servers in one
-place, driven by one agent loop. A web UI and a terminal UI share the same engine, so the same setup
-works on a laptop, on a headless box over SSH, in Docker, or behind a tunnel.
+**Your own LLM studio.** The models you use (hosted APIs, your own GPU servers, local runtimes), the MCP
+servers on your machine and remote agent servers in one place, driven by one agent loop. A web UI (English
+or Korean) and a terminal UI share the same engine, so the same setup works on a laptop, on a headless box
+over SSH, in Docker or behind a tunnel.
 
 Pure Python, installs in one line, remote-first. `missile` and the short alias `ms` are the same command.
 
@@ -11,7 +12,7 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
  OpenAI · Claude · Gemini · DashScope · OpenRouter   │
  Groq · DeepSeek · Mistral · xAI · Ollama · vLLM    │
  LM Studio · llama.cpp · LiteLLM · agent servers    ├── missile engine ──┬── terminal  (ms chat / ms ask)
-                                                    │  (agent loop,      │
+ any endpoint you paste                             │  (agent loop,      │
    tools ───────┤                                   │   policy, audit)   ├── MCP hub   (ms hub → Claude Code, Cursor, Claude Desktop)
  local: shell · files · search · fetch              │                    │
  MCP:  stdio · streamable-http · sse (any server)   ┘                    └── device bridge (ms bridge → remote agents use your PC)
@@ -19,88 +20,50 @@ Pure Python, installs in one line, remote-first. `missile` and the short alias `
 
 ## Screenshots
 
-**Sign in.** Dark by default, one geometric face for Latin and Hangul (SUIT, served by the studio itself, no
-font CDN), and your own picture as the mark and the tab icon (`static/brand/`, three files: replace them to
-rebrand). Accounts have roles: admins run the studio, users chat. Sign-up on the login page can be closed,
-invite-only (default, with a code shown in the admin console) or open. A session lasts 30 days when you ask it to.
-
-![login](docs/screenshots/login.png)
-
-**Chat.** Icon rail, chat list grouped by day, one conversation in the middle. Assistant and model are
-pills in the top bar, so you can switch mid-conversation. Every tool call is a collapsible card inside
-the answer: name, arguments, result, policy decision and duration. Markdown, code blocks with copy,
-thinking blocks, token usage. Edit any of your messages and resend: the chat forks, a small
-`‹ 1 / 2 ›` under the message switches between versions, and *Retry* forks the answer the same way.
-A writing style (Normal, Concise, Explanatory, Formal, Friendly, or your own) can be set per chat.
-Dark by default, with warm and light themes.
+**Chat.** Tool calls are cards inside the answer (arguments, result, policy decision, time). Each answer
+shows when it came, how long it took and how fast it streamed; the message box shows how full the context
+was on the last request. Editing or retrying a message forks the chat, and `‹ ›` switches between versions.
 
 ![chat](docs/screenshots/chat.png)
 
-**Model picker · presets · thinking.** The model pill opens with three quick picks, *Fast / Think / Best*,
-derived from your providers (or set your own in Settings → Defaults & presets), then every model of every
-provider with search. The brain button cycles thinking per chat (provider default → on → max → off);
-each provider gets its own switch underneath (budgets, reasoning effort, `enable_thinking`), so one
-toggle works everywhere.
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/picker.png" alt="model picker"><br><b>Model picker.</b> Quick presets first, then every model of every provider. Models whose server is down or whose key is missing are dimmed with the reason.</td>
+<td width="50%"><img src="docs/screenshots/approval.png" alt="approval"><br><b>Approvals.</b> A tool that writes or runs things pauses the turn: allow once, in this chat, always, or deny. The permission mode under the message box sets this per chat.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/custom-endpoint.png" alt="custom endpoint"><br><b>Custom endpoint.</b> Paste a host, a base URL or a full request URL and a key. The API format and base URL are found for you; tick the models to keep and star the default.</td>
+<td><img src="docs/screenshots/providers.png" alt="providers"><br><b>Providers.</b> Key (never sent back to the browser), base URL, test, and the model list: filter it, drop models from the picker, click one to make it the default.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/mcp.png" alt="MCP servers"><br><b>MCP servers.</b> Status, transport and the tools each server exposes, with read-only and destructive flags. Import the servers you already use in other MCP clients.</td>
+<td><img src="docs/screenshots/prompts.png" alt="prompt library"><br><b>Prompt library.</b> Saved prompts go in with <code>/name</code>; <code>{{blanks}}</code> in them are asked for first.</td>
+</tr>
+</table>
 
-![picker](docs/screenshots/picker.png)
-
-**Approvals.** When a tool is `ask`-level (destructive hint, dangerous shell pattern, or your rule) the turn
-pauses and a card appears in the flow: *Allow once · Allow for this chat · Always allow · Deny*. The same
-prompt appears inline in the terminal UI.
-
-![approval](docs/screenshots/approval.png)
-
-**Settings → Model providers.** Three columns like a desktop client: settings nav, provider list with a
-status dot, and the detail with an enable switch, key field (never sent back to the browser), *Test*,
-*Discover models* and the model list as chips (click one to make it the default).
-
-![providers](docs/screenshots/providers.png)
-
-**Settings → MCP servers.** Status, tool count and transport per server, the tools it exposes with
-read-only / destructive flags, restart, and one-click import from Claude Code, Claude Desktop, Cursor,
-Windsurf, VS Code or Cherry Studio.
-
-![mcp](docs/screenshots/mcp.png)
-
-**Split view · run chats side by side.** Up to three panes, each with its own conversation and model.
-Streams run concurrently; the chat list shows a pulsing dot on anything still answering, and switching
-chats never interrupts a running turn. *Link inputs* sends one message to every pane, so you can compare
-models on the same prompt.
+**Split view.** Up to three chats side by side, each with its own model. Linked inputs send one message to
+every pane, so you can compare models on the same prompt.
 
 ![split](docs/screenshots/split.png)
 
-**Workspace drawer · files, editor, terminal.** The folder your local tools work in, as an IDE-style
-drawer: browse the tree (it refreshes after the agent writes), open and edit files (`Ctrl/⌘ S` saves),
-ask the active chat about the open file, and run commands in the server-side shell. Writes and commands
-need the admin role and land in the audit log.
-
-![workspace](docs/screenshots/workspace.png)
-
-**Artifacts.** Long code blocks and HTML / SVG / Markdown / JSON documents in an answer become cards.
-Open one in the drawer for a live sandboxed preview or the code, copy it, save it into the workspace
-(previous versions are kept), or send it to the editor.
-
-![artifacts](docs/screenshots/artifacts.png)
-
-**Editor · edit a selection with the model.** Select text in the editor and a small bar appears: type an
-instruction, or *Fix / Comment / Explain / Review*. Replacements come back as a diff you apply or
-discard. Every save keeps the previous version; *Versions* lists them and shows the diff before you
-restore one.
-
-![editor](docs/screenshots/editor.png)
-
-**Search & commands.** `Ctrl/⌘ K` searches chats, runs any command (new chat, split, drawer, theme,
-settings pages) or asks a question straight away. `/` at the start of the message box lists slash
-commands (`/new /split /files /terminal /artifacts /tools /think /style /assistant /tool …`).
-`Ctrl/⌘ /` shows every shortcut. A long paste becomes an attached file instead of a wall of text.
-
-![palette](docs/screenshots/palette.png)
-
-**Admin console (`/admin`).** A separate, password-protected console: dashboard with warnings and
-24h activity, providers & MCP health with test/restart, access tokens with scopes, typed settings that
-apply immediately, event log, system status, retention. See [docs/GUIDE-admin.md](docs/GUIDE-admin.md).
-
-![admin](docs/screenshots/admin.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/artifacts.png" alt="artifacts"><br><b>Artifacts.</b> Long code blocks and HTML, SVG, Markdown or JSON documents become cards with a live preview, copy, download and save to the workspace.</td>
+<td width="50%"><img src="docs/screenshots/editor.png" alt="editor"><br><b>Workspace panel.</b> Files, an editor and a terminal over the folder the local tools work in. Select text to have the model fix, comment, explain or review it; changes come back as a diff.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/palette.png" alt="command palette"><br><b>Search and commands.</b> <code>Ctrl/⌘ K</code> finds chats, runs any command or asks a question. <code>/</code> in the message box lists slash commands and saved prompts.</td>
+<td><img src="docs/screenshots/audit.png" alt="audit log"><br><b>Audit log.</b> Every tool call with its decision and result. Page through it, search, filter by decision or failures, open a row in full, export as CSV.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/korean.png" alt="Korean interface"><br><b>English or Korean.</b> The whole interface switches with the button at the bottom of the rail. Here, settings for one chat: its own instructions, temperature and answer length.</td>
+<td><img src="docs/screenshots/admin.png" alt="admin console"><br><b>Admin console.</b> Warnings, 24-hour activity, provider and MCP health, access tokens, typed settings, events, system status and retention.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/intro.png" alt="intro"><br><b>At a glance.</b> The mark in the corner opens a short intro to the four parts of the studio, filled with what is connected right now.</td>
+<td><img src="docs/screenshots/login.png" alt="sign in"><br><b>Sign in.</b> Admin and user accounts, invite-only sign-up by default. Your own picture is the mark and the tab icon (<code>static/brand/</code>).</td>
+</tr>
+</table>
 
 ## Install (anywhere)
 
@@ -143,30 +106,22 @@ the file with `--api-key-env OPENAI_API_KEY`.
 
 | | |
 |---|---|
-| **Providers** | OpenAI-compatible (OpenAI, vLLM, Ollama, LM Studio, llama.cpp, DashScope, OpenRouter, Groq, DeepSeek, Mistral, xAI, LiteLLM, any gateway), Anthropic Messages API, Google Gemini, **remote agent servers**. Streaming, native tool calling, thinking/reasoning deltas, model discovery, per-provider `extra_body` (Qwen `enable_thinking`, etc.). A provider can follow an **endpoint file** ("base_url|model|api_key"), so a server that moves (a recreated GPU pod with a new address and key) is picked up without editing settings, and can name the MCP server whose wake command brings it up: when it is down, the chat error offers a Wake button. **Custom endpoint**: paste a bare host, a base URL or a full request URL (`…/chat/completions`) and a key; the API format (OpenAI-compatible, Anthropic, Gemini) and base URL are worked out, the model list comes back to tick the ones to keep and star the default. On a provider's page, filter its models and drop the ones you do not want in the picker. |
-| **MCP client** | stdio / streamable-http / sse servers, one supervised connection each (ping, backoff reconnect, per-call timeout, stderr logs). Tool names are `server__tool`. Import from Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Cherry Studio or pasted JSON. Export back as standard `mcpServers` JSON. A tool called while its server is reconnecting (restarted, network blip) waits up to 20 s for it instead of failing; if the server stays down the result says so and asks to try again. An MCP server can carry a **wake command** that Restart runs first, in the background, before reconnecting (e.g. bring up the GPU server it draws on): a progress bar with the percentage and time left shows in Settings and as a chip in the chat bar, driven by "##progress <pct> <eta_seconds> <stage>" lines or, without them, by how long the last run took. |
-| **Local tools** | `local__run_shell`, `read_file`, `write_file`, `list_dir`, `search_files`, `fetch_url`, `now`. Sandboxed to a workspace folder (symlink-safe). |
-| **Policy & approvals** | Per-tool `allow / ask / block` (globs like `fs__*`), read-only tools allowed by default, destructive hints and dangerous shell commands (`rm -rf`, `git push --force`, `curl | sh` ...) always ask. Approve once / for this chat / always, in the browser or in the terminal. A **permission mode** under the composer (Ask / Allow all / Read-only) sets how each chat behaves, remembered per conversation; blocked tools and dangerous shell commands still stop in Allow all. Every call lands in an **audit log**. The audit log pages through every call (25 to 200 per page), searches tools, arguments and results, filters by decision or failures, opens a row to the full arguments and result with a link to the chat, and exports the matching rows as CSV. |
-| **Tool catalog** | With more than 24 tools connected (configurable, or always on) the model is sent a one-line catalog instead of every schema, and loads the tools it needs with `local__load_tools` (exact names or a short query). A catalogued tool called by name still runs, and is defined from then on; loaded tools stay loaded for the conversation. Keeps small-context servers (a 16k vLLM) usable with 60+ tools, in native and prompt tool-calling alike. Settings → Tools & policy. |
-| **Harness** | One agent loop for every provider: tool calls of a turn run concurrently (4 at a time, approvals still one by one), provider errors before any output are retried with backoff (429, 5xx, connection), long threads are compacted by the model itself into a summary that replaces the old part (the recent tail stays verbatim), Anthropic requests cache the system prompt and tool list and replay thinking blocks with their signatures so extended thinking works through tool loops. Small context windows are respected end to end: Korean-aware token estimates, tool results capped for the model (the thread keeps them whole), older results and images shortened before each request, a long tool loop inside one turn folded into a one-line log of its earlier steps, and a context-length 400 answered by trimming harder and sending again. A turn that repeats the same tool call is nudged to wait (job_wait) or conclude, and if it still reaches the tool-call limit it ends with one forced plain-text answer instead of a bare tool call. A tool call the model writes as text instead of making it (untagged, unreadable, or cut off at the output limit) is caught: the chat says it did not run and the model is asked, at most twice, to send it properly; arguments that arrive as unreadable JSON never run the tool. An answer that stops mid-sentence or at the output limit while tools are in play is continued once: the model is told it stopped and to call the tool now if it was about to. Every answer keeps why it ended (finish reason, server stop reason) and its output tokens; hover the token count to see them, and an answer that did not end normally is flagged in its footer. |
-| **Models & presets** | Quick picks *Fast / Think / Best* at the top of the model picker, derived from your providers or configured in Settings → Defaults & presets. A per-chat thinking toggle (default / on / max / off) mapped to each provider's own switch: Anthropic budgets, reasoning effort on reasoning models, `enable_thinking` for Qwen-style servers, Gemini thinking budgets. Every provider is probed every 2 minutes and the instant a live turn fails (any provider-level error, not just a 5xx): models whose server is unreachable or whose key is missing are dimmed in the picker with the reason within seconds of a real failure, and the model button carries a small reachability dot. |
-| **Assistants & styles** | Assistants: system prompt + preferred provider/model + tool set + iteration cap. Writing styles (Normal, Concise, Explanatory, Formal, Friendly, or your own) switch the tone per chat without touching the assistant. Assistants also set temperature and max output tokens. **Chat settings** (the sliders button in the top bar) give one chat its own instructions, temperature and answer length on top of the assistant. A **prompt library** keeps reusable prompts: `/name` in the composer inserts one, and `{{blanks}}` in it are asked for first. |
-| **Search & memory** | Search chats by their contents, any language (FTS5 trigram), with snippets in the sidebar. Memories outlive a chat: the assistant saves facts with `memory_save`, recalls the best matches into every answer, and you edit the list in Settings → Memory. |
-| **Web & research** | `web_search` through one search API (DuckDuckGo without a key, or Tavily / Brave / Serper / SearXNG) plus `fetch_url`. The model looks things up on its own when a question needs current or external facts, and cites the sources; `/research` forces the full report mode (sub-questions, several sources, numbered citations). |
-| **Knowledge base** | Index folders and files (Markdown, text, code, PDF with pypdf) into chunks: keyword search always, embeddings through any OpenAI-compatible `/embeddings` endpoint when configured, fused by reciprocal rank. Once something is indexed, matching excerpts go into context automatically for every message (Settings → Knowledge base to turn that off); `/knowledge` forces more of them, and the assistant can also call `knowledge_search`. |
-| **Conversations** | SQLite, resumable, attachments (text/code/markdown/pdf*/images), markdown rendering, thinking blocks, tool cards. Edit a message to fork the chat; every branch is kept and `‹ ›` switches between them; retry forks the answer. Many chats can run at once; split the view into up to three panes and link their inputs to compare models. A turn keeps running on the server when the tab closes: open the chat again and it reattaches, replaying what you missed. Links in answers and tool results open in a new tab. An uploaded image is also saved to disk, and the model is told its path, so it can hand that exact path to any tool (local or MCP, in this server or another connected one) that takes a file or reference-image argument. Each chat in the list has a ⋯ menu: rename, pin to the top, export as Markdown or JSON, delete; a chat that finished while out of view gets a dot. Messages show their time and the answer speed (tokens per second); the composer shows how full the context was on the last request. Files dropped on the message box are attached. Reading earlier messages stops a streaming answer from pulling the view down (a ↓ button returns), and an answer that ends in a background tab marks the tab title, with an optional system notification. |
-| **Artifacts** | Long code blocks and HTML / SVG / Markdown / JSON documents become cards with a sandboxed live preview, copy, save to the workspace and open-in-editor. |
-| **Workspace** | IDE-style drawer over the local-tools folder: file tree, editor with save, selection editing through the model (instruction or Fix / Comment / Explain / Review, applied as a diff), saved versions with diff, terminal (server-side shell, admin only, audited). |
-| **Languages** | The whole interface (studio, admin console, sign-in) switches between English and Korean: the language button at the bottom of the rail, Settings → General, or the command palette. The choice is kept per browser; a first visit follows the browser's language. Every visible string goes through one dictionary (`static/i18n.js`), and a test fails when a new string has no translation. Settings has a search box (page names and what each page holds, in both languages), and Appearance sets the chat text size and a wide column. |
-| **Layout** | Drag the sidebar's edge to resize it, hide it with `Ctrl/⌘ B` (or click the rail icon you are on, or drag it all the way left); both are remembered in the browser, and on phones the list opens over the chat. The mark at the top of the rail opens a short intro to what the studio does (models, tools, harness, workspace, with what is connected right now); it also shows once on a first visit. The version sits at the top right of the chat. |
-| **Keyboard** | `Ctrl/⌘ K` palette (chats, commands, ask), `/` slash commands in the composer, `Ctrl/⌘ /` shortcut sheet, `Ctrl/⌘ \` split, `Ctrl/⌘ J` drawer, `Ctrl/⌘ B` sidebar, copy last answer / last code block, long paste → attached file. |
-| **Hub** | `ms hub` exposes *everything* (local tools + all MCP servers) as **one** MCP server over stdio or HTTP. Point Claude Code, Cursor or Claude Desktop at it. |
-| **Agent servers** | Chat with agents hosted on a remote agent platform (login, agent list, SSE stream, server-side tool events). `ms bridge` registers this machine as a device on that platform, so its agents can call your local tools and MCP servers through missile's policy. |
-| **Admin console** | `/admin`: username/password sessions, dashboard (warnings, 24h chart, top tools, model usage), chats browser, access tokens with `chat` / `admin` scopes, typed settings (maintenance mode, policy defaults, retention, token rotation), event log, system status, log tails, retention and vacuum. `ms admin …` manages users and tokens from the shell. |
-| **Accounts** | Admin accounts and chat-only user accounts. Sign-up on the login page is off, invite-code (default) or open; sessions last 12h or 30 days. |
-| **Remote** | Browser sign-in with an admin account (remembered for 30 days, one session for the studio and `/admin`) or an access token (auto-generated when bound to a non-loopback address), SSH port-forward friendly, Tailscale / Cloudflare Tunnel recipes, Docker image, systemd unit, Windows scheduled task. |
+| **Models** | OpenAI-compatible servers (OpenAI, vLLM, Ollama, LM Studio, llama.cpp, DashScope, OpenRouter, Groq, DeepSeek, Mistral, xAI, LiteLLM, any gateway), the Anthropic Messages API, Google Gemini and remote agent servers, with streaming, native tool calls, thinking and model discovery. Add one from a preset or by pasting any endpoint. Quick presets *Fast / Think / Best* sit at the top of the picker, and one thinking switch maps to each provider's own setting. Providers are health-checked every two minutes and right after a failed turn. |
+| **GPU servers that move** | A provider can follow an endpoint file (`base_url\|model\|api_key`), so a recreated GPU pod is picked up without editing settings. An MCP server can carry a wake command that *Restart* runs first, with a progress bar and the time left; when the provider is down, the chat offers a Wake button. |
+| **MCP client** | stdio, streamable HTTP and SSE servers, each on its own supervised connection (ping, reconnect with backoff, per-call timeout, stderr logs). Tools are named `server__tool`. Import from Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, Cherry Studio or pasted JSON; export as standard `mcpServers` JSON. |
+| **Local tools** | `run_shell`, `read_file`, `write_file`, `list_dir`, `search_files`, `fetch_url`, `web_search`, `now`, plus `memory_save` / `memory_search` and `knowledge_search`. Files and the shell are confined to a workspace folder (symlink-safe). |
+| **Policy & audit** | Per-tool `allow / ask / block` with globs; read-only tools run, dangerous shell commands always ask. A permission mode per chat (Ask / Allow all / Read-only). Every call lands in the audit log, which pages, searches, filters and exports CSV. |
+| **Harness** | One agent loop for every provider: concurrent tool calls, retries with backoff, history compaction, prompt caching, and tool calls through the prompt for servers without a tool parser. With many tools the model gets a one-line catalog and loads what it needs. Small context windows are respected end to end, a looping or cut-off turn is steered back, and every answer records why it ended. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#harness-small-models-and-long-runs). |
+| **Assistants, styles, prompts** | Assistants carry a system prompt, preferred model, tool set, temperature and output length. Writing styles change the tone per chat. Chat settings give one chat its own instructions, temperature and answer length. The prompt library inserts saved prompts with `/name` and asks for their `{{blanks}}`. |
+| **Chats** | Branches on edit and retry (`‹ ›`), retry with another model, up to three chats side by side with linked inputs, turns that keep running when the tab closes. Rename, pin, export (Markdown or JSON) from each chat's ⋯ menu. Drop files on the message box; images are saved to disk and their path is handed to tools. Answers show time, length, speed and why they ended. |
+| **Search, memory, knowledge** | Full-text search over every chat (any language). Memories the assistant saves and recalls across chats. A knowledge base over your folders (keyword search, optional embeddings) whose best excerpts go into context, and `web_search` with cited answers or a full `/research` report. |
+| **Workspace & artifacts** | A panel with the file tree, an editor with saved versions and model edits applied as a diff, and a terminal (admin only, audited). Artifacts preview HTML, SVG, Markdown and JSON in a sandbox. |
+| **Interface** | English or Korean (the rail button, Settings → General, or the palette; the first visit follows the browser). Dark, warm and light themes, chat text size and a wide column. A resizable, hideable sidebar, settings search, `Ctrl/⌘ K` palette, `/` commands and a shortcut sheet (`Ctrl/⌘ /`). Notifications when an answer finishes in a background tab. |
+| **Hub & agent servers** | `ms hub` exposes every tool (local and MCP) as one MCP server over stdio or HTTP for other clients. Chat with agents on a remote agent platform; `ms bridge` lends this machine's tools to them through missile's policy. |
+| **Admin & accounts** | `/admin`: dashboard, chats, access tokens with `chat` / `admin` scopes, typed settings, events, system status, log tails, retention. Admin and chat-only user accounts, sign-up off, by invite code (default) or open. `ms admin …` does the same from the shell. |
+| **Remote** | Browser sign-in (30-day sessions) or an access token, generated automatically on a non-loopback bind. SSH port-forward friendly; recipes for Tailscale, Cloudflare Tunnel, Docker, systemd and a Windows scheduled task. |
 
-\* PDF text needs `pip install pypdf`.
+PDF text in attachments and the knowledge base needs `pip install pypdf`.
 
 ## Remote use
 
@@ -196,16 +151,18 @@ Details in [docs/GUIDE-agent-server.md](docs/GUIDE-agent-server.md).
 
 ```
 src/missile_studio/
-  config.py          config.json model (providers, mcp_servers, policy, assistants, presets, styles, server)
-  store.py           SQLite: conversations, message tree (branches), tool audit
-  providers/         base contract + openai_compat / anthropic / gemini / agentserver adapters
+  config.py          config.json model (providers, mcp_servers, policy, assistants, presets, styles, prompts, server)
+  store.py           SQLite: conversations (pins, per-chat settings), message tree (branches), tool audit, memory, knowledge
+  engine.py          the agent loop: policy → approvals → execution → persistence → events, plus the harness
+  providers/         base contract + openai_compat / anthropic / gemini / agentserver adapters, probe.py (pasted endpoints)
   mcp/manager.py     supervised MCP connections, namespaced catalog, call_tool
   mcp/importers.py   read other clients' MCP configs
   tools/builtin.py   local sandboxed tools + dangerous-command detector
-  engine.py          the agent loop: policy → approvals → execution → persistence → events
+  knowledge.py       chunks, keyword search, optional embeddings, rank fusion
+  wake.py            wake commands with progress for servers that sleep
   server/app.py      FastAPI JSON API + SSE chat + auth (owner token, scoped tokens, admin sessions)
   server/admin.py    admin console backend: sessions, typed settings, dashboard, tokens, events, retention
-  server/static/     web UI + admin UI (vanilla JS, no build step)
+  server/static/     web UI + admin UI (vanilla JS, no build step); i18n.js holds the Korean text
   tui.py / cli.py    terminal chat, one-shot ask, management commands
   hub.py             everything as one MCP server
   device_bridge.py   device WebSocket client for agent servers
@@ -218,8 +175,11 @@ Design notes are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ```bash
 git clone https://github.com/jinsoo96/missile-studio && cd missile-studio
 uv venv && uv pip install -e ".[dev]"      # or: pip install -e ".[dev]"
-pytest -q                                  # providers (mock transports), MCP (real stdio fixture), engine, hub, API
+pytest -q                                  # providers (mock transports), MCP (real stdio fixture), engine, hub, API, UI text
 ```
+
+New interface text goes through `T('…')` in the UI scripts, with its Korean in `static/i18n.js`; a test fails
+when one is missing.
 
 ## License
 
