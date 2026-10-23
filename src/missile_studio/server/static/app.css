@@ -501,23 +501,29 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 .intro-scene { position: relative; height: 230px; overflow: hidden; border-bottom: 1px solid var(--border); }
 .intro-sky i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; animation: introTwinkle 3s ease-in-out infinite; }
 .intro-pad { position: absolute; left: 50%; bottom: 20px; width: 170px; height: 5px; margin-left: -85px; border-radius: 3px; background: linear-gradient(90deg, transparent, #3a4157 20%, #4a5370 50%, #3a4157 80%, transparent); }
-.intro-tower { position: absolute; left: calc(50% - 52px); bottom: 24px; width: 14px; height: 128px; border-left: 2px solid #3a4157; border-right: 2px solid #3a4157; background: repeating-linear-gradient(135deg, transparent 0 9px, #2c3346 9px 11px); }
-.intro-tower::after { content: ''; position: absolute; top: 34px; left: 12px; width: 22px; height: 2px; background: #3a4157; }
-.intro-rocket { position: absolute; left: 50%; bottom: -8px; width: 40px; margin-left: -20px; filter: drop-shadow(0 0 14px rgba(139, 124, 255, .35)); }
+/* the launch loop (11s): lift off, fly out of sight, come back on a landing burn, get caught by the tower's two
+   arms ("chopsticks"), set down on the pad, arms open, again. Every part runs on the same 11s clock. */
+.intro-scene { --loop: 11s; }
+.intro-tower { position: absolute; left: calc(50% - 96px); bottom: 24px; width: 16px; height: 158px; border-left: 2px solid #3a4157; border-right: 2px solid #3a4157; background: repeating-linear-gradient(135deg, transparent 0 9px, #2c3346 9px 11px); }
+.intro-tower::before { content: ''; position: absolute; top: -6px; left: -6px; width: 24px; height: 6px; border-radius: 2px 2px 0 0; background: #3a4157; }
+.intro-tower::after { content: ''; position: absolute; top: -14px; left: 5px; width: 2px; height: 8px; background: #3a4157; box-shadow: 0 -3px 6px 1px rgba(248, 113, 113, .6); }
+/* the carriage rides the tower; each arm swings on it (front arm in front of the rocket, back arm behind) */
+.intro-carriage { position: absolute; left: calc(50% - 100px); bottom: 79px; width: 24px; height: 14px; border-radius: 3px; background: #4a5370; box-shadow: inset 0 0 0 1px #5b6584; animation: introCarriage var(--loop) ease-in-out infinite; }
+.intro-arm { position: absolute; left: calc(50% - 78px); bottom: 84px; width: 102px; height: 5px; border-radius: 3px; transform-origin: 0 50%; }
+.intro-arm.front { z-index: 3; background: linear-gradient(90deg, #6b7593, #9aa3c2 70%, #c3cae0); transform: translateY(0) perspective(600px) rotateY(-80deg); animation: introArmFront var(--loop) ease-in-out infinite; }
+.intro-arm.back { z-index: 1; bottom: 88px; background: #3f4762; transform: translateY(0) perspective(600px) rotateY(80deg); animation: introArmBack var(--loop) ease-in-out infinite; }
+.intro-rocket { position: absolute; z-index: 2; left: 50%; bottom: -8px; width: 40px; margin-left: -20px; filter: drop-shadow(0 0 14px rgba(139, 124, 255, .35)); animation: introFlight var(--loop) linear infinite; }
 .intro-rocket svg { display: block; }
-.intro-rocket .flame { transform-box: fill-box; transform-origin: 50% 0; transform: scaleY(.22); opacity: .7; }
-.intro-scene.ignite .intro-rocket { animation: introShake .09s linear infinite; }
-.intro-scene.ignite .intro-rocket .flame { opacity: 1; animation: introFlame .12s ease-in-out infinite alternate; }
-.intro-scene.lift .intro-rocket { animation: introRise 1.9s cubic-bezier(.5, 0, .85, .25) forwards; }
-.intro-trail { position: absolute; left: 50%; bottom: 22px; width: 6px; height: 0; margin-left: -3px; border-radius: 3px; background: linear-gradient(0deg, rgba(251, 146, 60, 0), rgba(252, 211, 77, .55) 30%, rgba(255, 251, 232, .9)); filter: blur(1px); }
-.intro-scene.lift .intro-trail { animation: introTrail 1.9s cubic-bezier(.5, 0, .85, .25) forwards, introFade 1.4s 1.9s ease forwards; }
-.intro-smoke i { position: absolute; bottom: 14px; left: 50%; width: 38px; height: 38px; margin-left: -19px; border-radius: 50%; background: radial-gradient(circle, rgba(200, 205, 225, .5), rgba(200, 205, 225, 0) 70%); opacity: 0; }
-.intro-scene.ignite .intro-smoke i { animation: introSmoke 1.8s ease-out forwards; }
+.intro-rocket .flame, .intro-rocket .flicker { transform-box: fill-box; transform-origin: 50% 0; }
+.intro-rocket .flame { transform: scaleY(.2); opacity: 0; animation: introBurn var(--loop) linear infinite; }
+.intro-rocket .flicker { animation: introFlame .12s ease-in-out infinite alternate; }
+.intro-trail { position: absolute; z-index: 1; left: 50%; bottom: 22px; width: 6px; height: 0; margin-left: -3px; border-radius: 3px; background: linear-gradient(0deg, rgba(251, 146, 60, 0), rgba(252, 211, 77, .55) 30%, rgba(255, 251, 232, .9)); filter: blur(1px); animation: introTrail var(--loop) linear infinite; }
+.intro-smoke i { position: absolute; z-index: 3; bottom: 14px; left: 50%; width: 38px; height: 38px; margin-left: -19px; border-radius: 50%; background: radial-gradient(circle, rgba(200, 205, 225, .5), rgba(200, 205, 225, 0) 70%); opacity: 0; animation: introSmoke var(--loop) ease-out infinite; }
 .intro-smoke i:nth-child(1) { --sx: -70px; } .intro-smoke i:nth-child(2) { --sx: 70px; animation-delay: .05s; }
 .intro-smoke i:nth-child(3) { --sx: -120px; animation-delay: .15s; } .intro-smoke i:nth-child(4) { --sx: 120px; animation-delay: .2s; }
 .intro-smoke i:nth-child(5) { --sx: -30px; animation-delay: .3s; } .intro-smoke i:nth-child(6) { --sx: 30px; animation-delay: .35s; }
 .intro-orbit { position: absolute; top: 34px; left: 0; width: 5px; height: 5px; border-radius: 50%; background: #e9e5ff; box-shadow: 0 0 10px 3px rgba(139, 124, 255, .7), -14px 0 12px -2px rgba(139, 124, 255, .35); opacity: 0; }
-.intro-scene.orbit .intro-orbit { animation: introOrbit 9s linear infinite; }
+.intro-orbit { animation: introOrbit 9s 2s linear infinite; }
 .intro-count { position: absolute; right: 4px; bottom: 30px; font: 600 11px var(--mono); letter-spacing: .2em; color: #a99dff; }
 .intro-head { display: flex; align-items: center; gap: 12px; margin-top: 6px; animation: introUp .5s .1s ease both; }
 .intro-head .wordmark { font-size: 30px; }
@@ -532,17 +538,50 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 .intro-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .intro-chips .chip { display: inline-flex; align-items: center; gap: 6px; }
 .intro-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; animation: introUp .5s .7s ease both; }
-@media (max-width: 640px) { .intro-stages { grid-template-columns: 1fr; } .intro-scene { height: 190px; } .intro-head .wordmark { font-size: 26px; } }
+@media (max-width: 640px) { .intro-stages { grid-template-columns: 1fr; } .intro-scene { height: 190px; } .intro-tower { height: 140px; } .intro-head .wordmark { font-size: 26px; } }
 @keyframes introIn { from { opacity: 0; } }
 @keyframes introUp { from { opacity: 0; transform: translateY(10px); } }
 @keyframes introTwinkle { 50% { opacity: .1; } }
-@keyframes introShake { 25% { transform: translateX(-.6px); } 75% { transform: translateX(.6px); } }
 @keyframes introFlame { from { transform: scaleY(.85) scaleX(.92); } to { transform: scaleY(1.08) scaleX(1.04); } }
-@keyframes introRise { 0% { transform: translateY(0); } 100% { transform: translateY(-330px); } }
-@keyframes introTrail { 0% { height: 0; } 100% { height: 330px; } }
-@keyframes introFade { to { opacity: 0; } }
+/* 0-9% countdown · 9-30% liftoff and climb · 30-44% out of sight · 44-64% back down on the landing burn · 64-70% the arms close · 70-80% held · 80-90% set down · 90-96% arms open */
+@keyframes introFlight {
+  0%, 9% { transform: translateY(0); animation-timing-function: cubic-bezier(.55, 0, .9, .3); }
+  30% { transform: translateY(-350px); }
+  44% { transform: translateY(-350px); animation-timing-function: cubic-bezier(.15, .65, .3, 1); }
+  64% { transform: translateY(-30px); }
+  70% { transform: translateY(-30px); }
+  71.5% { transform: translateY(-27px); }
+  74%, 80% { transform: translateY(-30px); animation-timing-function: ease-in-out; }
+  90%, 100% { transform: translateY(0); }
+}
+@keyframes introBurn {
+  0%, 8% { transform: scaleY(.2); opacity: 0; }
+  9.5% { transform: scaleY(.45); opacity: 1; }
+  13%, 30% { transform: scaleY(1.1); opacity: 1; }
+  32%, 50% { transform: scaleY(.3); opacity: 0; }
+  53% { transform: scaleY(.7); opacity: 1; }
+  62% { transform: scaleY(1); opacity: 1; }
+  68% { transform: scaleY(.45); opacity: .8; }
+  70%, 100% { transform: scaleY(.2); opacity: 0; }
+}
+@keyframes introTrail { 0%, 9% { height: 0; opacity: 1; animation-timing-function: cubic-bezier(.55, 0, .9, .3); } 30% { height: 350px; opacity: 1; } 40%, 100% { height: 350px; opacity: 0; } }
+@keyframes introCarriage { 0%, 32% { transform: translateY(0); } 40%, 80% { transform: translateY(-30px); } 90%, 100% { transform: translateY(0); } }
+@keyframes introArmFront {
+  0%, 32% { transform: translateY(0) perspective(600px) rotateY(-80deg); }
+  40%, 64% { transform: translateY(-30px) perspective(600px) rotateY(-80deg); }
+  70%, 80% { transform: translateY(-30px) perspective(600px) rotateY(0); }
+  90% { transform: translateY(0) perspective(600px) rotateY(0); }
+  96%, 100% { transform: translateY(0) perspective(600px) rotateY(-80deg); }
+}
+@keyframes introArmBack {
+  0%, 32% { transform: translateY(0) perspective(600px) rotateY(80deg); }
+  40%, 64% { transform: translateY(-30px) perspective(600px) rotateY(80deg); }
+  70%, 80% { transform: translateY(-30px) perspective(600px) rotateY(0); }
+  90% { transform: translateY(0) perspective(600px) rotateY(0); }
+  96%, 100% { transform: translateY(0) perspective(600px) rotateY(80deg); }
+}
 @keyframes introOrbit { 0% { opacity: 0; transform: translate(-10px, 46px); } 8% { opacity: 1; } 25% { transform: translate(190px, 12px); } 50% { transform: translate(390px, 0); } 75% { transform: translate(590px, 12px); } 92% { opacity: 1; } 100% { opacity: 0; transform: translate(790px, 46px); } }
-@keyframes introSmoke { 0% { opacity: 0; transform: translateX(0) scale(.4); } 25% { opacity: .9; } 100% { opacity: 0; transform: translateX(var(--sx)) translateY(-14px) scale(2.4); } }
+@keyframes introSmoke { 0%, 9% { opacity: 0; transform: translateX(0) scale(.4); } 12% { opacity: .9; } 26%, 56% { opacity: 0; transform: translateX(var(--sx)) translateY(-14px) scale(2.4); } 57% { opacity: 0; transform: translateX(0) scale(.4); } 62% { opacity: .7; } 74%, 100% { opacity: 0; transform: translateX(calc(var(--sx) * .8)) translateY(-10px) scale(2); } }
 /* the assistant button shows a stand-in icon only on phones, where its name is hidden */
 .topbar .asst-ico { display: none; }
 /* phones: the top bar and the composer bar fit the width (the version is in the intro, model labels shrink) */

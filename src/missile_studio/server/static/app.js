@@ -835,7 +835,7 @@
   const ROCKET = '<svg viewBox="0 0 40 124" width="40" height="124"><defs>'
     + '<linearGradient id="rkBody" x1="0" x2="1"><stop offset="0" stop-color="#c9cee2"/><stop offset=".5" stop-color="#f5f6fb"/><stop offset="1" stop-color="#b3b9d3"/></linearGradient>'
     + '<linearGradient id="rkFlame" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fffbe8"/><stop offset=".3" stop-color="#fcd34d"/><stop offset=".7" stop-color="#fb923c"/><stop offset="1" stop-color="#f97316" stop-opacity="0"/></linearGradient></defs>'
-    + '<path class="flame" d="M12 92 Q20 136 28 92 Z" fill="url(#rkFlame)"/>'
+    + '<g class="flicker"><path class="flame" d="M12 92 Q20 136 28 92 Z" fill="url(#rkFlame)"/></g>'
     + '<path d="M20 3 C30 15 32 30 32 44 L32 92 L8 92 L8 44 C8 30 10 15 20 3 Z" fill="url(#rkBody)"/>'
     + '<path d="M20 3 C26 10 29 18 30.6 27 L9.4 27 C11 18 14 10 20 3 Z" fill="#8b7cff"/>'
     + '<circle cx="20" cy="46" r="5.5" fill="#141821" stroke="#8b7cff" stroke-width="2"/>'
@@ -854,7 +854,7 @@
     const sky = el('div', { class: 'intro-sky' });
     for (let i = 0; i < 30; i++) sky.append(el('i', { style: `left:${(Math.random() * 100).toFixed(1)}%;top:${(Math.random() * 78).toFixed(1)}%;animation-delay:${(Math.random() * 3).toFixed(2)}s;opacity:${(0.25 + Math.random() * 0.6).toFixed(2)}` }));
     const count = el('div', { class: 'intro-count' }, 'T-3');
-    const scene = el('div', { class: 'intro-scene', 'aria-hidden': 'true' }, sky, el('div', { class: 'intro-tower' }), el('div', { class: 'intro-trail' }), el('div', { class: 'intro-rocket', html: ROCKET }), el('div', { class: 'intro-smoke' }, [0, 1, 2, 3, 4, 5].map(() => el('i'))), el('div', { class: 'intro-pad' }), el('div', { class: 'intro-orbit' }), count);
+    const scene = el('div', { class: 'intro-scene', 'aria-hidden': 'true' }, sky, el('div', { class: 'intro-tower' }), el('div', { class: 'intro-carriage' }), el('div', { class: 'intro-arm back' }), el('div', { class: 'intro-trail' }), el('div', { class: 'intro-rocket', html: ROCKET }), el('div', { class: 'intro-arm front' }), el('div', { class: 'intro-smoke' }, [0, 1, 2, 3, 4, 5].map(() => el('i'))), el('div', { class: 'intro-pad' }), el('div', { class: 'intro-orbit' }), count);
     const launch = el('button', { class: 'btn primary', onclick: () => { close(); $('.composerInput', paneEl(activePane()))?.focus(); } }, I('send', 'sm'), T('Launch'));
     const ov = el('div', { class: 'intro', role: 'dialog', 'aria-modal': 'true', 'aria-label': T('About missile studio') },
       el('button', { class: 'btn quiet icon sm intro-x', 'aria-label': T('Close'), onclick: () => close() }, I('x', 'sm')),
@@ -874,10 +874,14 @@
     document.body.append(ov);
     const timers = [];
     const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // the caption follows the 11s launch-and-catch loop in app.css (phase ends in % of the loop)
+    const PHASES = [[3, 'T-3'], [6, 'T-2'], [9, 'T-1'], [30, 'LIFTOFF'], [44, 'BOOSTBACK'], [64, 'LANDING BURN'], [70, 'CATCH'], [80, 'CAUGHT'], [90, 'SET DOWN'], [100, 'RESET']];
+    const t0 = performance.now();
+    const tick = () => { const at = ((performance.now() - t0) % 11000) / 110; const txt = PHASES.find(([end]) => at < end)[1]; if (count.textContent !== txt) count.textContent = txt; };
     if (calm) count.textContent = 'READY';
-    else [[450, 'T-2'], [900, 'T-1', 'ignite'], [1350, 'LIFTOFF', 'lift'], [3300, 'IN ORBIT', 'orbit']].forEach(([ms, txt, cls]) => timers.push(setTimeout(() => { count.textContent = txt; if (cls) scene.classList.add(cls); }, ms)));
+    else timers.push(setInterval(tick, 100));
     const key = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
-    function close() { timers.forEach(clearTimeout); ov.remove(); document.removeEventListener('keydown', key); }
+    function close() { timers.forEach(clearInterval); ov.remove(); document.removeEventListener('keydown', key); }
     document.addEventListener('keydown', key);
     setTimeout(() => launch.focus({ preventScroll: true }), 0);
   }
