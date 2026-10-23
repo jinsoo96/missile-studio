@@ -48,6 +48,18 @@ def test_tool_call_scanner_splits_text_and_calls():
     assert sc4.feed("<tool_call>just words</tool_call> ok") == "just words ok" and not sc4.calls
 
 
+def test_tool_call_missing_final_brace_is_closed_but_a_cut_string_is_not():
+    """A call whose values are complete but whose last '}' is missing still runs (braces inside string values do not
+    count); a call cut off inside a string value is not completed."""
+    sc = ToolCallScanner()
+    call = '{"name": "w__style_compare", "arguments": {"styles": "{\\"a\\": \\"x { y\\"}", "scenes": "[1]"}'
+    assert sc.feed(f"<tool_call>\n{call}\n</tool_call>") == ""
+    assert sc.calls[0]["name"] == "w__style_compare" and sc.calls[0]["arguments"]["scenes"] == "[1]"
+    sc2 = ToolCallScanner()
+    sc2.feed('<tool_call>{"name": "w__write", "arguments": {"text": "half of the val</tool_call>')
+    assert not sc2.calls and sc2.rejected == 1
+
+
 def test_prompt_mode_tools_end_to_end(client):
     """The engine switches to prompt mode, parses <tool_call> blocks, runs the tool, feeds the result back as
     <tool_response>, and remembers the switch on the provider."""

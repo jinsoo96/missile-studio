@@ -54,19 +54,53 @@ def _json_loads_lenient(raw: str) -> dict:
         v = json.loads(raw)
         return v if isinstance(v, dict) else {"value": v}
     except json.JSONDecodeError:
-        # Some models emit two concatenated objects or trailing junk; keep the first object.
-        depth = 0
-        for i, ch in enumerate(raw):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(raw[: i + 1])
-                    except json.JSONDecodeError:
-                        break
-        return {"_raw": raw}
+        pass
+    # Some models emit two concatenated objects or trailing junk; keep the first object.
+    start = raw.find("{")
+    if start >= 0:
+        try:
+            v, _ = json.JSONDecoder().raw_decode(raw[start:])
+            if isinstance(v, dict):
+                return v
+        except json.JSONDecodeError:
+            pass
+        # Others drop the last closing brace(s) of a call whose values are all complete (a 27B model left off the
+        # final "}" of a call with nested JSON strings three times in a row). Close them only when no string is
+        # open: a string cut off mid-value is a truncated call and must not run with half its arguments.
+        closers = _missing_closers(raw[start:])
+        if closers:
+            try:
+                v = json.loads(raw[start:] + closers)
+                if isinstance(v, dict):
+                    return v
+            except json.JSONDecodeError:
+                pass
+    return {"_raw": raw}
+
+
+def _missing_closers(s: str) -> str:
+    """The '}' / ']' that would balance s, scanning outside strings. '' when balanced, when a string is still open,
+    or when the brackets do not match."""
+    stack: list[str] = []
+    in_str = esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack.pop() != ch:
+                return ""
+    if in_str or not stack:
+        return ""
+    return "".join(reversed(stack))
 
 
 class BaseProvider:
