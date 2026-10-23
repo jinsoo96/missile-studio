@@ -68,7 +68,8 @@ def cmd_ask(args) -> int:
 
     async def run():
         try:
-            return await ask_once(engine, text, args.provider or "", args.model or "", args.assistant or "", tools, as_json=args.json, allow_dangerous=args.allow_dangerous)
+            return await ask_once(engine, text, args.provider or "", args.model or "", args.assistant or "", tools, as_json=args.json, allow_dangerous=args.allow_dangerous,
+                                  conversation_id=args.conversation or "")
         finally:
             await engine.stop()
 
@@ -579,6 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--no-tools", action="store_true")
     a.add_argument("--json", action="store_true")
     a.add_argument("--allow-dangerous", action="store_true")
+    a.add_argument("--conversation", "-c", help="continue this conversation id (from an earlier --json answer)")
     a.set_defaults(fn=cmd_ask)
 
     pv = sp.add_parser("provider", aliases=["p", "providers"], help="manage model providers")

@@ -317,6 +317,7 @@ def _is_turn_start(m: dict) -> bool:
 
 
 # ---------------------------------------------------------------- tool calls written as text (did not run)
+SERVER_NOTES_CHARS = 1500  # one server's usage notes in the system prompt, at most
 NOTE_PREFIX = "(note from the studio: "
 STRAY_NUDGES = 2  # times one turn asks the model to send a call it wrote as text again
 _STRAY_CALL = re.compile(r'\{\s*"(?:name|tool|function)"\s*:\s*"([^"\n]{1,120})"\s*,\s*"(?:arguments|parameters|args|input)"\s*:')
@@ -978,6 +979,15 @@ class Engine:
             self.store.update_conversation(req.conversation_id, title=req.user_text.strip().splitlines()[0][:60] if req.user_text.strip() else "New chat")
 
         system = self._system_prompt(assistant, [])
+        # each tool server's own usage notes (MCP InitializeResult.instructions), for the servers whose tools are in this turn:
+        # without them a 27B model spent its whole step budget reading docs instead of following the server's "call guide() first"
+        notes = []
+        for name in sorted({t.server for t in tools if t.server != LOCAL}):
+            st = self.mcp.servers.get(name)
+            if st is not None and st.instructions:
+                notes.append(f"[{name}] {st.instructions[:SERVER_NOTES_CHARS]}")
+        if notes:
+            system += "\n\nNotes from the connected tool servers on how to use their tools:\n" + "\n".join(notes)
         style = self.cfg.style(req.style_id or conv.get("style_id") or "")
         if style and style.prompt:
             system += "\n\nWriting style: " + style.prompt

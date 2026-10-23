@@ -162,7 +162,8 @@ async def chat_loop(engine: Engine, provider_id: str = "", model: str = "", assi
             console.print("[dim]interrupted[/dim]")
 
 
-async def ask_once(engine: Engine, text: str, provider_id: str = "", model: str = "", assistant_id: str = "", tools: Any = None, as_json: bool = False, allow_dangerous: bool = False) -> int:
+async def ask_once(engine: Engine, text: str, provider_id: str = "", model: str = "", assistant_id: str = "", tools: Any = None, as_json: bool = False, allow_dangerous: bool = False,
+                   conversation_id: str = "") -> int:
     await engine.start()
     engine.approvals.prompt = _prompt_approval if sys.stdin.isatty() else None
     if engine.approvals.prompt is None:
@@ -172,7 +173,12 @@ async def ask_once(engine: Engine, text: str, provider_id: str = "", model: str 
 
         engine.approvals.prompt = _deny
     await engine.mcp.wait_ready(timeout=15.0)
-    conv = engine.store.create_conversation(title=text[:60], assistant_id=assistant_id or "default")
+    # --conversation continues an earlier chat (scripts that drive a multi-turn task one message at a time)
+    conv = engine.store.get_conversation(conversation_id) if conversation_id else None
+    if conversation_id and conv is None:
+        print(f"no such conversation: {conversation_id}", file=sys.stderr)
+        return 2
+    conv = conv or engine.store.create_conversation(title=text[:60], assistant_id=assistant_id or "default")
     req = TurnRequest(conversation_id=conv["id"], user_text=text, provider_id=provider_id, model=model, assistant_id=assistant_id, tools_override=tools, allow_dangerous=allow_dangerous)
     if as_json:
         events = []

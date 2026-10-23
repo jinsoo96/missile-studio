@@ -82,6 +82,7 @@ class ServerState:
     connected_at: float = 0.0
     attempts: int = 0
     server_info: dict = field(default_factory=dict)
+    instructions: str = ""  # the server's own usage notes (InitializeResult.instructions), shown to the model
     session: Any = None
     task: Optional[asyncio.Task] = None
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -278,6 +279,7 @@ class McpManager:
             init = await asyncio.wait_for(session.initialize(), timeout=max(10.0, cfg.timeout))
             si = getattr(init, "server_info", None) or getattr(init, "serverInfo", None)
             st.server_info = {"name": getattr(si, "name", ""), "version": getattr(si, "version", "")} if si else {}
+            st.instructions = str(getattr(init, "instructions", "") or "").strip()
             st.session = session
             await self._refresh_tools(st)
             st.status = "connected"

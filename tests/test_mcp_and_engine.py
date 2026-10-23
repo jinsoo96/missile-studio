@@ -30,6 +30,7 @@ async def test_mcp_manager_connect_call_and_errors(tmp_path, monkeypatch):
     await mgr.wait_ready(timeout=60)
     st = mgr.servers["echo"]
     assert st.status == "connected", st.error
+    assert st.instructions == "test server"  # the server's own usage notes are kept for the system prompt
     names = sorted(t.full_name for t in mgr.list_tools())
     assert "echo__echo" in names and "echo__shout_destructive" in names
     t = mgr.find_tool("echo__shout_destructive")
@@ -126,6 +127,7 @@ async def test_engine_turn_with_tools_and_approval(engine: Engine):
     # second provider call saw the tool results in canonical form
     second = FakeProvider.seen[1]
     assert second[0]["role"] == "system" and "Tools available" in second[0]["content"]
+    assert "[echo] test server" in second[0]["content"]  # MCP InitializeResult.instructions reach the model
     assert [m["role"] for m in second[1:]] == ["user", "assistant", "tool", "tool"]
     assert second[-1]["tool_call_id"] == "c2"
     # session allow persisted for this conversation
