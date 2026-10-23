@@ -31,7 +31,7 @@ def test_catalog_loads_tools_on_demand(client):
     # first request: only load_tools and the always-list are defined; the catalog names everything else
     assert sorted(FakeProvider.tools_seen[0]) == ["local__load_tools", "local__now"]
     sys0 = FakeProvider.seen[-3][0]["content"]
-    assert "Tool catalog:" in sys0 and "- echo__echo:" in sys0 and "- echo__shout_destructive:" in sys0
+    assert "Tool catalog:" in sys0 and "- echo__echo(text):" in sys0 and "- echo__shout_destructive(text):" in sys0  # argument names shown in the catalog
     # after load_tools the next request carries echo__echo's schema, and still not the others
     assert "echo__echo" in FakeProvider.tools_seen[1] and "echo__shout_destructive" not in FakeProvider.tools_seen[1]
     res = [e for e in events if e["type"] == "tool_result"]
@@ -102,7 +102,7 @@ def test_catalog_in_prompt_mode(client):
     events = _chat(client, conv["id"], "echo yo")
     first = FakeProvider.seen[-3][0]["content"]
     second = FakeProvider.seen[-2][0]["content"]
-    assert "Tool catalog:" in first and "- echo__echo:" in first.split("Tool catalog:")[1].split("Available tools:")[0]
+    assert "Tool catalog:" in first and "- echo__echo(text):" in first.split("Tool catalog:")[1].split("Available tools:")[0]
     assert "- local__load_tools:" in first.split("Available tools:")[1] and "- echo__echo:" not in first.split("Available tools:")[1]
     assert "- echo__echo:" in second.split("Available tools:")[1]
     res = [e for e in events if e["type"] == "tool_result"]

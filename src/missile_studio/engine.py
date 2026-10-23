@@ -118,6 +118,17 @@ def _tools_line(tools: list) -> str:
     )
 
 
+def _arg_names(t) -> str:
+    """'(series, episode, panel, seed?)': the argument names of a catalogued tool, optional ones marked with '?'. A model that called a
+    tool before loading its schema guessed panel_id / id / name for panel / key / doc and lost a step on each guess."""
+    props = (getattr(t, "input_schema", None) or {}).get("properties") or {}
+    if not props:
+        return ""
+    req = set((t.input_schema or {}).get("required") or [])
+    names = [n for n in props if n in req] + [f"{n}?" for n in props if n not in req]
+    return "(" + ", ".join(names[:8]) + (", …" if len(names) > 8 else "") + ")"
+
+
 def _catalog_prompt(tools: list, loaded: set) -> str:
     """One line per connected tool, grouped by server: enough to pick, not the schemas."""
     by_server: dict[str, list] = {}
@@ -127,7 +138,7 @@ def _catalog_prompt(tools: list, loaded: set) -> str:
     for server, ts in by_server.items():
         lines.append(f"[{server}]")
         for t in ts:
-            lines.append(f"- {t.full_name}: {_short(t.description)}" + (" (loaded)" if t.full_name in loaded else ""))
+            lines.append(f"- {t.full_name}{_arg_names(t)}: {_short(t.description)}" + (" (loaded)" if t.full_name in loaded else ""))
     return (
         f"Tool catalog: {len(tools)} tools are connected, but only the loaded ones are fully defined. Before using any other "
         f"tool, call {LOAD_TOOLS.full_name} with its exact name(s) (names=\"a,b\") or a short query; it returns the argument "
