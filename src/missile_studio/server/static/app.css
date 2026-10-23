@@ -125,12 +125,14 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .picker .name { font-weight: 500; }
 
 /* ---------- menus / modals ---------- */
-.menu { position: fixed; z-index: 40; min-width: 260px; max-width: 420px; max-height: 60vh; overflow: auto; background: var(--popover); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 6px; }
+.menu { position: fixed; z-index: 40; min-width: 260px; max-width: 440px; max-height: 60vh; overflow: auto; background: var(--popover); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 6px; }
 .menu .msearch { position: sticky; top: 0; background: var(--popover); padding: 4px 4px 6px; }
 .menu .mgroup { font-size: 11px; font-weight: 600; color: var(--fg-3); padding: 8px 10px 4px; text-transform: uppercase; letter-spacing: .04em; }
 .menu .mitem { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px; cursor: pointer; }
 .menu .mitem:hover, .menu .mitem.hl { background: var(--bg-subtle); } .menu .mitem.sel { color: var(--primary); }
 .menu .mitem .sub { margin-left: auto; font-size: 11px; color: var(--fg-3); }
+/* the name stays whole ("Read-only", a model id) and a long description wraps beside it */
+.menu .mitem > .truncate { flex-shrink: 0; max-width: 70%; }
 .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 50; display: grid; place-items: center; padding: 20px; }
 .modal { width: min(640px, 100%); max-height: 90vh; overflow: auto; background: var(--popover); border: 1px solid var(--border); border-radius: var(--r-xl); box-shadow: var(--shadow-pop); }
 .modal header { display: flex; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
@@ -650,3 +652,20 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 .composer .bar .modelbtn { flex: 0 1 auto; min-width: 0; }
 .composer .bar .send, .composer .bar .stop { flex: none; }
 .panes .pane-col:not(:only-child) .composer .bar .btn.quiet.sm:not(.modelbtn):not(.icon) { font-size: 0; gap: 0; }
+
+/* scrollbars follow the theme: native parts (scrollbars, select lists) use the theme's color scheme, and
+   the bar itself is a thin thumb in the border tone on a clear track, so a dark screen has no white strip */
+:root { color-scheme: light; --scroll-thumb: #cdd0d7; --scroll-thumb-hover: #afb3bd; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]):not([data-theme="warm"]) { color-scheme: dark; --scroll-thumb: #363a45; --scroll-thumb-hover: #4b505d; } }
+:root[data-theme="dark"] { color-scheme: dark; --scroll-thumb: #363a45; --scroll-thumb-hover: #4b505d; }
+:root[data-theme="warm"] { --scroll-thumb: #d9d2c3; --scroll-thumb-hover: #c2b9a6; }
+/* Chromium and Safari draw the ::-webkit-scrollbar parts (no arrow buttons); the standard properties are only for
+   Firefox, since Chromium ignores the webkit parts once they are set */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+  *:hover { scrollbar-color: var(--scroll-thumb-hover) transparent; }
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border: 2px solid transparent; border-radius: 999px; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); border: 2px solid transparent; background-clip: content-box; }
