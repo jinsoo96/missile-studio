@@ -545,3 +545,6 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
   .topbar > .btn.quiet { flex: 0 1 auto; min-width: 0; overflow: hidden; }
   .composer .bar .modelbtn { flex: 0 1 auto; min-width: 0; }
 }
+
+/* UI language switch in the rail: the current language as a small badge */
+.rail .lang-badge { font: 700 11px var(--mono); letter-spacing: .02em; line-height: 1; }

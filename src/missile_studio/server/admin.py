@@ -393,10 +393,10 @@ def warnings_for(engine, store, app_state) -> list[dict]:
         out.append({"code": "no_providers", "text": "No model provider configured; chats cannot start.", "fix": "settings"})
     for p in engine.cfg.providers:
         if p.kind in ("openai", "anthropic", "gemini") and not p.resolved_api_key() and not any(h in (p.base_url or "") for h in ("127.0.0.1", "localhost", "host.docker.internal")):
-            out.append({"code": "provider_no_key", "text": f"Provider '{p.id}' has no API key.", "fix": "settings"})
+            out.append({"code": "provider_no_key", "text": f"Provider '{p.id}' has no API key.", "fix": "settings", "params": {"id": p.id}})
     for s in engine.mcp.status():
         if s["status"] == "failed":
-            out.append({"code": "mcp_failed", "text": f"MCP server '{s['name']}' failed: {(s.get('error') or '')[:120]}", "fix": "system"})
+            out.append({"code": "mcp_failed", "text": f"MCP server '{s['name']}' failed: {(s.get('error') or '')[:120]}", "fix": "system", "params": {"name": s["name"], "error": (s.get("error") or "")[:120]}})
     if engine.cfg.server.host not in ("127.0.0.1", "localhost", "::1") and not app_state.token:
         out.append({"code": "public_no_token", "text": "Server is reachable from other machines without an access token.", "fix": "settings"})
     if store.get_setting("maintenance_mode", False):

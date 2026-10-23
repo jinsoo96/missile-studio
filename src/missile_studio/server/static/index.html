@@ -4,42 +4,44 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>missile studio</title>
-<link rel="icon" type="image/png" sizes="64x64" href="/static/brand/favicon.png?v=0.9.3"><link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon.png?v=0.9.3">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/brand/favicon.png?v=0.10.0"><link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon.png?v=0.10.0">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=0.9.3">
+<link rel="stylesheet" href="/static/app.css?v=0.10.0">
 <script>try{var t=localStorage.getItem('missile_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}</script>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/icons.js?v=0.9.3"></script>
+<script src="/static/i18n.js?v=0.10.0"></script>
+<script src="/static/icons.js?v=0.10.0"></script>
 </head>
 <body>
 <div id="login" class="login hidden">
   <form id="loginForm">
     <h1><span class="logo-slot"></span><span class="wordmark">missile<em>studio</em></span></h1>
-    <p class="muted" style="margin:0">Sign in with your account. Admin sessions also open <code>/admin</code>.</p>
-    <input id="loginUser" class="input" placeholder="username" autocomplete="username" value="admin">
-    <input id="loginPass" class="input" type="password" placeholder="password" autocomplete="current-password">
-    <label class="muted tiny" style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="loginRemember" type="checkbox" checked> Stay signed in on this browser (30 days)</label>
-    <details><summary class="muted tiny" style="cursor:pointer">Use an access token instead</summary><input id="loginToken" class="input" type="password" placeholder="access token (ms serve printed it)" autocomplete="off" style="margin-top:8px"></details>
-    <button type="submit" class="btn primary">Sign in</button>
+    <p class="muted" style="margin:0" data-i18n-html="Sign in with your account. Admin sessions also open &lt;code&gt;/admin&lt;/code&gt;.">Sign in with your account. Admin sessions also open <code>/admin</code>.</p>
+    <input id="loginUser" class="input" placeholder="username" data-i18n-ph="Username" autocomplete="username" value="admin">
+    <input id="loginPass" class="input" type="password" placeholder="password" data-i18n-ph="Password" autocomplete="current-password">
+    <label class="muted tiny" style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="loginRemember" type="checkbox" checked> <span data-i18n="Stay signed in on this browser (30 days)">Stay signed in on this browser (30 days)</span></label>
+    <details><summary class="muted tiny" style="cursor:pointer" data-i18n="Use an access token instead">Use an access token instead</summary><input id="loginToken" class="input" type="password" placeholder="access token (ms serve printed it)" data-i18n-ph="Access token (printed by ms serve)" autocomplete="off" style="margin-top:8px"></details>
+    <button type="submit" class="btn primary" data-i18n="Sign in">Sign in</button>
     <div id="loginErr" class="muted tiny" style="color:var(--destructive)"></div>
-    <div id="toSignup" class="muted tiny hidden">No account? <a href="#" id="toSignupLink">Create one</a></div>
+    <div id="toSignup" class="muted tiny hidden"><span data-i18n="No account?">No account?</span> <a href="#" id="toSignupLink" data-i18n="Create one">Create one</a></div>
+    <div class="muted tiny"><a href="#" data-lang-toggle></a></div>
   </form>
   <form id="signupForm" class="hidden">
-    <h1><span class="logo-slot"></span><span class="wordmark">new <em>account</em></span></h1>
-    <p class="muted" style="margin:0">A studio account: chat with every model and tool. Settings stay with the admin.</p>
-    <input id="suUser" class="input" placeholder="username (letters, digits, . _ -)" autocomplete="username">
-    <input id="suPass" class="input" type="password" placeholder="password (8+ characters)" autocomplete="new-password">
-    <input id="suPass2" class="input" type="password" placeholder="repeat password" autocomplete="new-password">
-    <input id="suInvite" class="input" placeholder="invite code" autocomplete="off">
-    <button type="submit" class="btn primary">Create account</button>
+    <h1><span class="logo-slot"></span><span class="wordmark" data-i18n-html="new &lt;em&gt;account&lt;/em&gt;">new <em>account</em></span></h1>
+    <p class="muted" style="margin:0" data-i18n="A studio account chats with every model and tool. Settings stay with the admin.">A studio account chats with every model and tool. Settings stay with the admin.</p>
+    <input id="suUser" class="input" placeholder="username (letters, digits, . _ -)" data-i18n-ph="Username (letters, digits, . _ -)" autocomplete="username">
+    <input id="suPass" class="input" type="password" placeholder="password (8+ characters)" data-i18n-ph="Password (8 characters or more)" autocomplete="new-password">
+    <input id="suPass2" class="input" type="password" placeholder="repeat password" data-i18n-ph="Repeat the password" autocomplete="new-password">
+    <input id="suInvite" class="input" placeholder="invite code" data-i18n-ph="Invite code" autocomplete="off">
+    <button type="submit" class="btn primary" data-i18n="Create account">Create account</button>
     <div id="suErr" class="muted tiny" style="color:var(--destructive)"></div>
-    <div class="muted tiny">Already have one? <a href="#" id="toLoginLink">Sign in</a></div>
+    <div class="muted tiny"><span data-i18n="Already have one?">Already have one?</span> <a href="#" id="toLoginLink" data-i18n="Sign in">Sign in</a> · <a href="#" data-lang-toggle></a></div>
   </form>
 </div>
 <div id="app"></div>
 <div id="layer"></div>
-<script src="/static/app.js?v=0.9.3"></script>
+<script src="/static/app.js?v=0.10.0"></script>
 </body>
 </html>
