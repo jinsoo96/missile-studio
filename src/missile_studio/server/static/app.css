@@ -548,3 +548,62 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 
 /* UI language switch in the rail: the current language as a small badge */
 .rail .lang-badge { font: 700 11px var(--mono); letter-spacing: .02em; line-height: 1; }
+.rail button.lang { height: 48px; gap: 1px; align-content: center; }
+.rail button.lang .lang-badge { font: 700 9.5px var(--font); letter-spacing: 0; }
+
+/* add provider: the custom endpoint card above the presets */
+.btn.custom-ep { height: auto; width: 100%; padding: 12px 14px; justify-content: flex-start; text-align: left; gap: 12px; border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: var(--primary-soft); }
+.btn.custom-ep .em { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--primary); color: var(--primary-fg); }
+.btn.custom-ep .muted { white-space: normal; font-weight: 400; }
+.probe { display: grid; gap: 8px; }
+.probe .okline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--success); font-size: 13px; font-weight: 600; }
+.probe .mlist { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
+.probe .mrow { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 7px; font-size: 13px; cursor: pointer; }
+.probe .mrow:hover { background: var(--bg-subtle); }
+.probe .mrow:not(.on) .mono { color: var(--fg-3); }
+.probe .mrow .star { margin-left: auto; border: 0; background: transparent; color: var(--fg-3); cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; }
+.probe .mrow .star.on, .probe .mrow .star:hover { color: var(--warning); }
+/* provider models: ✕ drops one from the picker */
+.chip.mchip { gap: 6px; padding-right: 4px; }
+.chip.mchip .x { border: 0; background: transparent; color: var(--fg-3); cursor: pointer; font-size: 10px; padding: 0 3px; border-radius: 4px; }
+.chip.mchip .x:hover { color: var(--destructive); background: var(--destructive-soft); }
+/* audit log rows open to show everything */
+.table.audit .arow { cursor: pointer; }
+.table.audit .arow:hover td { background: var(--bg-subtle); }
+.table.audit .adetail td { background: var(--bg-subtle); }
+.table.audit .adetail pre { max-height: 260px; overflow: auto; white-space: pre-wrap; font-size: 12px; margin: 4px 0 0; }
+.table.audit .adetail .lbl { font-size: 11px; font-weight: 600; color: var(--fg-3); text-transform: uppercase; letter-spacing: .04em; }
+.table.audit .adetail .adgrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+@media (max-width: 760px) { .table.audit .adetail .adgrid { grid-template-columns: 1fr; } }
+
+/* chat list: the ⋯ menu button shows on hover (and on touch screens always) */
+.pane-item .x { opacity: 0; }
+.pane-item:hover .x, .pane-item.active .x, .pane-item .x:focus-visible { opacity: 1; }
+@media (hover: none) { .pane-item .x { opacity: .7; } }
+.pane-item .x:hover { color: var(--fg); background: var(--bg-subtle); }
+/* files dragged over the message box */
+.composer.dropping { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent); }
+
+/* back to the latest message while a reply streams below */
+.pane-col { position: relative; }
+.jump-bottom { position: absolute; right: 22px; bottom: 150px; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border); background: var(--popover); color: var(--fg-muted); display: grid; place-items: center; cursor: pointer; box-shadow: var(--shadow-pop); opacity: 0; pointer-events: none; transform: translateY(6px); transition: opacity .15s, transform .15s; z-index: 5; }
+.jump-bottom.show { opacity: 1; pointer-events: auto; transform: none; }
+.jump-bottom:hover { color: var(--fg); border-color: var(--border-strong); }
+
+/* message meta: time first */
+.meta .ts { color: var(--fg-3); }
+/* a chat that finished while it was out of view */
+.pane-item .unread { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); flex: none; margin-right: 4px; }
+/* settings search above the settings menu */
+.snav .sfind { height: 32px; margin: 6px 0 4px; font-size: 13px; }
+/* context gauge in the composer bar */
+.composer .bar .ctx { display: inline-flex; align-items: center; gap: 6px; font: 500 11px var(--mono); color: var(--fg-3); white-space: nowrap; margin-right: 4px; }
+.composer .bar .ctx.warn { color: var(--warning); }
+.composer .bar .ctxbar { width: 34px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; display: inline-block; }
+.composer .bar .ctxbar i { display: block; height: 100%; background: var(--fg-3); }
+.composer .bar .ctx.warn .ctxbar i { background: var(--warning); }
+@media (max-width: 640px) { .composer .bar .ctx { display: none; } }
+/* chat text size and wide column (Settings → General → Appearance) */
+:root[data-text="s"] .chat-inner { font-size: 13px; }
+:root[data-text="l"] .chat-inner { font-size: 16px; }
+:root[data-wide="1"] .chat-inner, :root[data-wide="1"] .composer { max-width: 1200px; }

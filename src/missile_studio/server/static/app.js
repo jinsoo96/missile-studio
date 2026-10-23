@@ -6,7 +6,8 @@
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs)) {
       if (v === undefined || v === null || v === false) continue;
-      if (k === 'class') n.className = v; else if (k === 'html') n.innerHTML = v; else if (k === 'style') n.style.cssText = v; else if (k.startsWith('on')) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? '' : v);
+      // value is set as the property: a textarea ignores a value attribute and would show up empty
+      if (k === 'class') n.className = v; else if (k === 'html') n.innerHTML = v; else if (k === 'style') n.style.cssText = v; else if (k === 'value') n.value = v; else if (k.startsWith('on')) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? '' : v);
     }
     for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) n.append(k.nodeType ? k : document.createTextNode(String(k)));
     return n;
@@ -34,6 +35,9 @@
     return pre;
   }
   const fmtMs = (ms) => ms == null ? '' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+  // a message time: the clock for today, the date too for older ones
+  const fmtClock = (ts) => { const d = new Date(ts * 1000); return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); };
+  const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : String(n);
   const fmtBytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
   const initials = (s) => (s || '?').replace(/[^a-z0-9]/gi, '').slice(0, 2).toUpperCase() || '?';
   const hue = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
@@ -158,13 +162,18 @@
 
   // ---------------------------------------------------------------- state
   const newPane = () => ({ id: Math.random().toString(36).slice(2, 8), convId: null, conv: null, messages: [], branches: {}, sel: {}, attachments: [], draft: '', editing: null, pendingEdit: null });
-  const S = { st: null, convs: [], view: 'chat', settingsPage: 'providers', sel: {}, search: '', panes: [newPane()], active: 0, live: {}, linkInputs: false, artifacts: {},
+  const S = { st: null, convs: [], unread: {}, view: 'chat', settingsPage: 'providers', sel: {}, search: '', panes: [newPane()], active: 0, live: {}, linkInputs: false, artifacts: {},
     drawer: { open: false, tab: 'files', path: '.', entries: [], file: null, term: [], loading: false, artifact: null, aTab: 'preview', versions: null } };
   const THEMES = ['dark', 'warm', 'light'];  // dark is the default look
   const theme = {
     get: () => document.documentElement.getAttribute('data-theme') || 'dark',
     set(t) { t = t || 'dark'; document.documentElement.setAttribute('data-theme', t); try { localStorage.setItem('missile_theme', t); } catch {} render(); },
     toggle() { const cur = this.get(); this.set(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]); },
+  };
+  // chat text size and width (per browser; applied before first paint by the script in index.html)
+  const view = {
+    get: (k) => document.documentElement.getAttribute('data-' + k) || '',
+    set(k, v) { if (v) document.documentElement.setAttribute('data-' + k, v); else document.documentElement.removeAttribute('data-' + k); try { if (v) localStorage.setItem('missile_' + k, v); else localStorage.removeItem('missile_' + k); } catch {} render(); },
   };
   // UI language (English / Korean), remembered in this browser; each language is named in itself
   const LANG_NAME = { en: 'English', ko: '한국어' };
@@ -255,8 +264,8 @@
         el('button', { class: S.drawer.open ? 'active' : '', onclick: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }, 'aria-label': T('Workspace') }, I('file'), el('span', { class: 'tip' }, T('Workspace · artifacts') + ' (Ctrl/⌘ J)')),
         el('button', { onclick: () => openPalette(), 'aria-label': T('Search') }, I('search'), el('span', { class: 'tip' }, T('Search & commands') + ' (Ctrl/⌘ K)')),
         el('button', { onclick: () => theme.toggle(), 'aria-label': T('Theme') }, I(cur === 'dark' ? 'moon' : cur === 'warm' ? 'sparkles' : 'sun'), el('span', { class: 'tip' }, T('Theme: {cur} → {next}', { cur: T(cur), next: T(THEMES[(THEMES.indexOf(cur) + 1) % 3]) }))),
-        el('button', { class: 'lang', onclick: () => setLang(other), 'aria-label': T('Language') }, el('span', { class: 'lang-badge' }, i18n.lang === 'ko' ? '한' : 'EN'), el('span', { class: 'tip' }, `${T('Language')}: ${LANG_NAME[i18n.lang]} → ${LANG_NAME[other]}`)),
-        el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': T('Admin console') }, I('shield'), el('span', { class: 'tip' }, T('Admin console')))));
+        el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': T('Admin console') }, I('shield'), el('span', { class: 'tip' }, T('Admin console'))),
+        el('button', { class: 'lang', onclick: () => setLang(other), 'aria-label': T('Language') }, I('globe', 'sm'), el('span', { class: 'lang-badge' }, i18n.lang === 'ko' ? '한국어' : 'EN'), el('span', { class: 'tip' }, `${T('Language')}: ${LANG_NAME[i18n.lang]} → ${LANG_NAME[other]}`))));
   }
 
   // ---------------------------------------------------------------- list panes
@@ -266,6 +275,42 @@
     await api('/api/conversations/' + id, { method: 'DELETE' });
     for (const p of S.panes) if (p.convId === id) { p.convId = null; p.conv = null; p.messages = []; p.branches = {}; }
     await loadConvs(); render();
+  }
+  // ---- one chat's ⋯ menu in the list: rename, pin to the top, export, delete
+  function convMenu(anchor, c) {
+    menu(anchor, [
+      { label: T('Rename'), icon: 'edit', run: () => renameConv(c) },
+      { label: c.pinned > 0 ? T('Unpin') : T('Pin to top'), icon: 'pin', run: () => pinConv(c, !(c.pinned > 0)) },
+      { label: T('Export as Markdown'), icon: 'download', run: () => exportConv(c.id, 'md') },
+      { label: T('Export as JSON'), icon: 'download', run: () => exportConv(c.id, 'json') },
+      { label: T('Delete'), icon: 'trash', run: () => deleteConv(c.id) },
+    ], { onPick: (it) => it.run() });
+  }
+  async function renameConv(c) {
+    const title = await promptDialog(T('Rename chat'), c.title || '', '');
+    if (title == null || title === c.title) return;
+    try { await api('/api/conversations/' + c.id, { method: 'PATCH', body: { title } }); for (const p of S.panes) if (p.convId === c.id && p.conv) p.conv.title = title; await loadConvs(); render(); } catch (e) { toast(e.message, true); }
+  }
+  async function pinConv(c, on) {
+    try { await api('/api/conversations/' + c.id, { method: 'PATCH', body: { pinned: on } }); await loadConvs(); render(); } catch (e) { toast(e.message, true); }
+  }
+  // the visible branch of a chat as Markdown (tool calls as one line each) or as the full JSON
+  async function exportConv(id, fmt) {
+    let c; try { c = await api('/api/conversations/' + id); } catch (e) { return toast(e.message, true); }
+    const name = (c.title || 'chat').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 60) || 'chat';
+    if (fmt === 'json') return saveBlob(name + '.json', JSON.stringify(c, null, 2), 'application/json');
+    const out = [`# ${c.title || T('New chat')}`, '']; let last = '';
+    for (const m of c.messages || []) {
+      if (m.role === 'user' && m.meta?.note) continue;
+      if (m.role === 'user') { out.push(`## ${T('You')}`, '', textOf(m), ''); last = 'user'; }
+      else if (m.role === 'assistant') {
+        if (last !== 'assistant') out.push(`## ${T('Assistant')}${m.meta?.model ? ` · ${shortModel(m.meta.model)}` : ''}`, '');
+        if (m.content) out.push(m.content, '');
+        for (const tc of m.tool_calls || []) out.push(`> ${T('Tool')}: \`${tc.name}\``, '');
+        last = 'assistant';
+      }
+    }
+    saveBlob(name + '.md', out.join('\n'), 'text/markdown;charset=utf-8');
   }
   function renderConvPane() {
     const pane = el('div', { class: 'pane' });
@@ -292,11 +337,11 @@
         if (seen.size) list.append(box);
       }, 250);
       for (const c of items) {
-        const g = groupLabel(c.updated_at); if (g !== last) { list.append(el('div', { class: 'pane-group' }, g)); last = g; }
+        const g = c.pinned > 0 ? T('Pinned') : groupLabel(c.updated_at); if (g !== last) { list.append(el('div', { class: 'pane-group' }, g)); last = g; }
         const a = assistantOf(c.assistant_id); const running = !!S.live[c.id] || c.running;
         list.append(el('div', { class: 'pane-item' + (activePane().convId === c.id ? ' active' : ''), style: openIds.has(c.id) && activePane().convId !== c.id ? 'box-shadow: inset 0 0 0 1px var(--border)' : '', onclick: () => openConv(activePane(), c.id) },
           el('div', { class: 'body' }, el('div', { class: 'title truncate' }, customEmoji(a), c.title || T('New chat')), el('div', { class: 'sub truncate' }, running ? T('Running…') : (shortModel(c.model) || providerOf(c.provider_id)?.label || ''))),
-          running ? el('span', { class: 'run', title: T('A turn is running') }) : el('button', { class: 'x', title: T('Delete'), onclick: (e) => { e.stopPropagation(); deleteConv(c.id); } }, I('trash', 'xs'))));
+          running ? el('span', { class: 'run', title: T('A turn is running') }) : S.unread[c.id] ? el('span', { class: 'unread', title: T('New answer') }) : null, running ? null : el('button', { class: 'x', title: T('More'), 'aria-label': T('More'), onclick: (e) => { e.stopPropagation(); convMenu(e.currentTarget, c); } }, I('more', 'sm'))));
       }
       if (!items.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px 10px' }, S.convs.length ? T('No chats match.') : T('No chats yet. Start one.')));
     }
@@ -329,7 +374,7 @@
     return pill;
   }
   // the same menu opens from the top-bar pill and from the model label in the composer
-  function openModelMenu(pane, anchor) {
+  function openModelMenu(pane, anchor, then) {
       const t = targetOf(pane); const preset = presetOf(pane, t);
       const items = [];
       if ((S.st.model_presets || []).length) {
@@ -344,13 +389,39 @@
         for (const m of models.slice(0, 400)) items.push({ label: shortModel(m), sub: p.id + (bad ? ' · ' + healthLabel(h.state) : ''), pid: p.id, model: m, selected: !preset && p.id === t.pid && m === t.model, dim: bad, title: h.error || '' });
       }
       if (!items.length) items.push({ label: T('Add a provider in Settings'), sub: '', pid: '', model: '' });
-      menu(anchor, items, { searchable: true, onPick: (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } applyTarget(pane, it.pid, it.model, it.thinking, it.presetId); } });
+      menu(anchor, items, { searchable: true, onPick: (it) => { if (!it.pid) { S.view = 'settings'; S.settingsPage = 'providers'; render(); return; } applyTarget(pane, it.pid, it.model, it.thinking, it.presetId).then(() => then && then()); } });
   }
   const THINK_ORDER = ['', 'on', 'max', 'off'];
   function cycleThinking(pane) { pane.sel.thinking = THINK_ORDER[(THINK_ORDER.indexOf(pane.sel.thinking || '') + 1) % THINK_ORDER.length]; pane.sel.preset = null; render(); }
   function thinkingButton(pane) {
     const cur = pane.sel.thinking || '';
     return el('button', { class: 'ico' + (cur === 'on' || cur === 'max' ? ' on' : ''), title: T('Thinking: {mode} · click to cycle (default → on → max → off)', { mode: T(THINK_LABEL[cur]) }), onclick: () => cycleThinking(pane) }, I('brain', 'sm'));
+  }
+
+  // ---------------------------------------------------------------- chat settings: instructions, temperature and output length for one chat
+  const chatSettingsOf = (pane) => (pane.conv ? pane.conv.settings : pane.sel.chatSettings) || {};
+  const hasChatSettings = (cs) => !!(cs.instructions || cs.temperature != null || cs.max_tokens);
+  function chatSettingsButton(pane) {
+    const cs = chatSettingsOf(pane); const on = hasChatSettings(cs);
+    const tip = on ? [cs.instructions ? T('Instructions: {text}', { text: cs.instructions.slice(0, 80) }) : '', cs.temperature != null ? T('Temperature {n}', { n: cs.temperature }) : '', cs.max_tokens ? T('Max output tokens {n}', { n: cs.max_tokens }) : ''].filter(Boolean).join('\n') : T('Chat settings: instructions, temperature, answer length');
+    return el('button', { class: 'ico' + (on ? ' on' : ''), title: tip, 'aria-label': T('Chat settings'), onclick: () => openChatSettings(pane) }, I('sliders', 'sm'));
+  }
+  function openChatSettings(pane) {
+    const cs = { ...chatSettingsOf(pane) };
+    const ins = el('textarea', { class: 'textarea', style: 'min-height:120px', placeholder: T('e.g. Answer in Korean. Keep code comments short.'), value: cs.instructions || '' });
+    const temp = el('input', { class: 'input', type: 'number', min: 0, max: 2, step: 0.1, placeholder: T('Assistant default'), value: cs.temperature ?? '' });
+    const maxT = el('input', { class: 'input', type: 'number', min: 1, placeholder: T('Assistant default'), value: cs.max_tokens ?? '' });
+    const save = async (v) => {
+      if (pane.conv) { try { pane.conv = { ...pane.conv, ...(await api('/api/conversations/' + pane.convId, { method: 'PATCH', body: { settings: v } })) }; } catch (e) { return toast(e.message, true); } }
+      else pane.sel.chatSettings = v;
+      m.close(); render(); toast(hasChatSettings(v) ? T('Chat settings saved') : T('Chat settings cleared'));
+    };
+    const m = modal({ title: T('Chat settings'), body: [
+      el('div', { class: 'muted tiny' }, T('Only for this chat. Empty fields follow the assistant.')),
+      field(T('Instructions for this chat'), ins, T('Added after the assistant prompt and takes priority over it.')),
+      el('div', { class: 'grid2' }, field(T('Temperature'), temp, T('Lower is steadier, higher is more varied.')), field(T('Max output tokens'), maxT, T('The longest answer per request.')))],
+      footer: [el('button', { class: 'btn quiet', onclick: () => save({}) }, T('Clear all')), el('span', { class: 'spacer' }), el('button', { class: 'btn', onclick: () => m.close() }, T('Cancel')), el('button', { class: 'btn primary', onclick: () => save({ instructions: ins.value.trim(), temperature: temp.value === '' ? null : parseFloat(temp.value), max_tokens: maxT.value === '' ? null : parseInt(maxT.value, 10) }) }, I('check', 'sm'), T('Save'))] });
+    setTimeout(() => ins.focus(), 0);
   }
 
   // ---------------------------------------------------------------- chat panes
@@ -365,7 +436,7 @@
     const waking = (S.st.wake || []).filter(wakeActive);
     const wakeChip = waking.length ? el('button', { class: 'chip info wake-chip', title: waking.map((j) => `${j.server}: ${j.stage}`).join('\n'), onclick: () => { S.view = 'settings'; S.settingsPage = 'mcp'; S.sel.mcpName = waking[0].server; render(); } }, I('refresh', 'xs'), T('Waking {server} · {status}', { server: waking[0].server, status: wakeLabel(waking[0]) })) : null;
     const showPaneBtn = idx === 0 && (ui.paneHidden || narrow()) ? el('button', { class: 'ico', title: T('Show sidebar') + ' (Ctrl/⌘ B)', 'aria-label': T('Show sidebar'), onclick: togglePane }, I('sidebar', 'sm')) : null;
-    const bar = el('div', { class: 'topbar' }, showPaneBtn, asstBtn, modelPicker(pane), thinkingButton(pane), toolsBtn, wakeChip, el('span', { class: 'spacer' }));
+    const bar = el('div', { class: 'topbar' }, showPaneBtn, asstBtn, modelPicker(pane), thinkingButton(pane), chatSettingsButton(pane), toolsBtn, wakeChip, el('span', { class: 'spacer' }));
     if (idx === S.panes.length - 1 && S.st.version) bar.append(el('button', { class: 'ver', title: T('missile studio {v} · what this is', { v: S.st.version }), onclick: () => openIntro() }, 'v' + S.st.version));
     if (S.panes.length > 1) bar.append(el('button', { class: 'ico' + (S.linkInputs ? ' on' : ''), title: S.linkInputs ? T('Inputs linked: one message goes to every pane') : T('Link inputs: send one message to every pane to compare models'), onclick: () => { S.linkInputs = !S.linkInputs; render(); } }, I('link', 'sm')));
     if (S.panes.length < MAX_PANES) bar.append(el('button', { class: 'ico', title: T('Split: open another chat beside this one') + ' (Ctrl/⌘ \\)', onclick: () => splitPane(idx) }, I('columns', 'sm')));
@@ -373,6 +444,10 @@
     if (pane.conv) bar.append(el('button', { class: 'ico', title: T('Delete chat'), onclick: () => deleteConv(pane.convId) }, I('trash', 'sm')));
     col.append(bar);
     const scroll = el('div', { class: 'chat-scroll' }); const inner = el('div', { class: 'chat-inner' }); scroll.append(inner); col.append(scroll);
+    // reading earlier messages stops the stream from pulling the view down; the ↓ button (or sending) resumes it
+    const jump = el('button', { class: 'jump-bottom', title: T('Jump to the latest'), 'aria-label': T('Jump to the latest'), onclick: () => { pane.follow = true; jump.classList.remove('show'); scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'smooth' }); } }, I('chevron', 'sm'));
+    scroll.addEventListener('scroll', () => { pane.follow = atBottom(scroll); pane.scrollTop = scroll.scrollTop; jump.classList.toggle('show', !pane.follow); });
+    col.append(jump);
     renderMessages(pane, inner);
     col.append(renderComposer(pane));
     return col;
@@ -456,7 +531,7 @@
           ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); } if (e.key === 'Escape') { pane.editing = null; render(); } });
           setTimeout(() => ta.focus(), 0); i++; continue;
         }
-        const bub = el('div', { class: 'bubble' }, text);
+        const bub = el('div', { class: 'bubble', title: m.ts ? new Date(m.ts * 1000).toLocaleString() : '' }, text);
         for (const p of (Array.isArray(m.content) ? m.content : [])) if (p.type === 'image_url') bub.append(el('img', { src: p.image_url.url }));
         inner.append(el('div', { class: 'turn-user' }, el('span', { class: 'uact' }, el('button', { class: 'btn quiet icon sm', title: T('Edit and resend as a new branch'), onclick: () => { pane.editing = m.id; render(); } }, I('edit', 'xs')), el('button', { class: 'btn quiet icon sm', title: T('Copy'), onclick: () => navigator.clipboard.writeText(text).then(() => toast(T('Copied'))) }, I('copy', 'xs'))), bub, el('div', { class: 'av' }, userAvatar())));
         const nav = branchNav(pane, m.id); if (nav) inner.append(el('div', { class: 'bnav' }, nav));
@@ -464,7 +539,7 @@
       }
       if (m.role === 'assistant') {
         const { node, content, body } = assistantTurn(pane, m.meta?.model);
-        let totalMs = 0, usage = null, lastText = '', finishInfo = null; const firstId = m.id;
+        let totalMs = 0, usage = null, lastText = '', finishInfo = null, speed = 0; const firstId = m.id, firstTs = m.ts;
         while (i < pane.messages.length && pane.messages[i].role !== 'user') {
           const mm = pane.messages[i];
           if (mm.role === 'assistant') {
@@ -472,22 +547,22 @@
             if (mm.content) { const mdEl = el('div', { class: 'md', html: md(mm.content) }); artifactize(mdEl, mm.id, pane.convId); content.append(mdEl); lastText = mm.content; }
             if (mm.meta?.error_text) { const ep = providerOf(mm.meta.provider || pane.conv?.provider_id || ''); const ws = ep?.wake_server; const wj = ws && (S.st.wake || []).find((j) => j.server === ws); content.append(el('div', { class: 'error-line' }, mm.meta.error_text, /401|credential|api key|unauthorized/i.test(mm.meta.error_text) ? el('button', { class: 'btn sm', style: 'margin-left:10px', onclick: () => { S.view = 'settings'; S.settingsPage = 'providers'; S.sel.providerId = pane.conv?.provider_id || ''; render(); } }, T('Open provider settings')) : null, ws && unusable(ep) ? (wakeActive(wj) ? el('span', { class: 'chip info', style: 'margin-left:10px' }, T('Waking · {status}', { status: wakeLabel(wj) })) : el('button', { class: 'btn sm primary', style: 'margin-left:10px', title: T('Runs the wake command of {server}, then reconnects', { server: ws }), onclick: () => wakeServer(ws) }, I('refresh', 'sm'), T('Wake {server}', { server: ws }))) : null)); }
             for (const c of mm.tool_calls || []) content.append(toolCard(c, toolResults[c.id], !!live));
-            if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage; if (mm.meta?.finish) { finishInfo = { finish: mm.meta.finish, stop_reason: mm.meta.stop_reason, out: mm.meta.usage?.output_tokens }; }
+            if (mm.meta?.duration_ms) totalMs += mm.meta.duration_ms; if (mm.meta?.usage) usage = mm.meta.usage; if (mm.meta?.usage?.output_tokens > 1 && mm.meta?.duration_ms > 200) speed = mm.meta.usage.output_tokens / (mm.meta.duration_ms / 1000); if (mm.meta?.finish) { finishInfo = { finish: mm.meta.finish, stop_reason: mm.meta.stop_reason, out: mm.meta.usage?.output_tokens }; }
           }
           i++;
         }
-        const meta = el('div', { class: 'meta' }); if (totalMs) meta.append(el('span', {}, T('Processed · {time}', { time: fmtMs(totalMs) }))); if (usage) meta.append(el('span', { title: finishInfo ? finishTitle(finishInfo) : '' }, T('{in}↑ {out}↓ tokens', { in: usage.input_tokens || 0, out: usage.output_tokens || 0 }))); if (finishInfo && !NORMAL_FINISH.has(finishInfo.finish)) meta.append(el('span', { class: 'finish-flag', title: finishTitle(finishInfo) }, T('Ended: {reason}', { reason: finishInfo.finish })));
+        const meta = el('div', { class: 'meta' }); if (firstTs) meta.append(el('span', { class: 'ts', title: new Date(firstTs * 1000).toLocaleString() }, fmtClock(firstTs))); if (totalMs) meta.append(el('span', {}, T('Processed · {time}', { time: fmtMs(totalMs) }))); if (usage) meta.append(el('span', { title: finishInfo ? finishTitle(finishInfo) : '' }, T('{in}↑ {out}↓ tokens', { in: usage.input_tokens || 0, out: usage.output_tokens || 0 }))); if (speed) meta.append(el('span', { title: T('Output speed of the last request') }, T('{n} tok/s', { n: speed < 10 ? speed.toFixed(1) : Math.round(speed) }))); if (finishInfo && !NORMAL_FINISH.has(finishInfo.finish)) meta.append(el('span', { class: 'finish-flag', title: finishTitle(finishInfo) }, T('Ended: {reason}', { reason: finishInfo.finish })));
         const nav = branchNav(pane, firstId); if (nav) meta.append(nav);
         const acts = el('span', { class: 'actions' });
         if (lastText) { const lt = lastText; acts.append(el('button', { class: 'btn quiet icon sm', title: T('Copy answer'), onclick: () => navigator.clipboard.writeText(lt).then(() => toast(T('Copied'))) }, I('copy', 'xs')), el('button', { class: 'btn quiet icon sm', title: T('Download answer as Markdown (.md)'), onclick: () => saveBlob(((pane.conv?.title || 'answer').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 50) || 'answer') + '.md', lt, 'text/markdown;charset=utf-8') }, I('download', 'xs'))); }
-        if (lastUser) { const lu = lastUser; acts.append(el('button', { class: 'btn quiet icon sm', title: T('Retry: ask again as a new branch'), onclick: () => startStream(pane, textOf(lu), [], { branchFrom: lu.id }) }, I('refresh', 'xs'))); }
+        if (lastUser) { const lu = lastUser; acts.append(el('button', { class: 'btn quiet icon sm', title: T('Retry: ask again as a new branch'), onclick: () => startStream(pane, textOf(lu), [], { branchFrom: lu.id }) }, I('refresh', 'xs')), el('button', { class: 'btn quiet icon sm', title: T('Retry with another model'), onclick: (e) => openModelMenu(pane, e.currentTarget, () => startStream(pane, textOf(lu), [], { branchFrom: lu.id })) }, I('chevron', 'xs'))); }
         meta.append(acts); body.append(meta); inner.append(node); continue;
       }
       i++;
     }
     if (live) { if (live.userNode) inner.append(live.userNode); inner.append(live.node); }
     addCopyButtons(inner);
-    requestAnimationFrame(() => { inner.parentElement.scrollTop = inner.parentElement.scrollHeight; });
+    requestAnimationFrame(() => { const sc = inner.parentElement; if (pane.follow === false && pane.scrollTop != null) { sc.scrollTop = pane.scrollTop; sc.parentElement.querySelector('.jump-bottom')?.classList.add('show'); } else sc.scrollTop = sc.scrollHeight; });
   }
 
   // ---------------------------------------------------------------- composer: pills, style, "/" commands, long paste as a file
@@ -519,7 +594,13 @@
       if (!handled && text.length > 2000) { e.preventDefault(); pane.attachments.push({ name: `pasted-${pane.attachments.length + 1}.txt`, text }); renderPills(); toast(T('Long paste attached as a file')); }
     });
     box.append(ta);
-    const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { for (const f of e.target.files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } e.target.value = ''; renderPills(); } });
+    const upload = async (files) => { for (const f of files) { const fd = new FormData(); fd.append('file', f); try { pane.attachments.push(await api('/api/upload', { method: 'POST', body: fd })); } catch (err) { toast(`${f.name}: ${err.message}`, true); } } renderPills(); };
+    const fileInput = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: async (e) => { await upload([...e.target.files]); e.target.value = ''; } });
+    // files dropped anywhere on the message box are attached like the paperclip does
+    const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+    wrap.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); box.classList.add('dropping'); });
+    wrap.addEventListener('dragleave', (e) => { if (!wrap.contains(e.relatedTarget)) box.classList.remove('dropping'); });
+    wrap.addEventListener('drop', (e) => { if (!hasFiles(e)) return; e.preventDefault(); box.classList.remove('dropping'); upload([...e.dataTransfer.files]); });
     const modelBtn = el('button', { class: 'btn quiet sm modelbtn' + (unusable(t.provider) ? ' dim' : ''), title: T('Change model') }, el('span', { class: 'truncate' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : T('Pick a model')), t.provider ? hdot(t.provider) : null, I('chevron', 'xs'));
     modelBtn.addEventListener('click', () => openModelMenu(pane, modelBtn));
     // permission mode for this chat (research and knowledge need no switch: the model looks things up when a question needs it)
@@ -528,12 +609,16 @@
     permBtn.addEventListener('click', () => menu(permBtn, Object.entries(PERM).map(([id, [label, sub]]) => ({ label: T(label), sub: T(sub), id, selected: id === perm })), { onPick: (it) => setPerm(pane, it.id) }));
     const styleBtn = el('button', { class: 'btn quiet sm', title: T('Writing style') }, I('wand', 'sm'), t.style && t.style.id !== 'normal' ? t.style.name : T('Style'));
     styleBtn.addEventListener('click', () => menu(styleBtn, (S.st.styles || []).map((s) => ({ label: s.name, sub: s.prompt ? s.prompt.slice(0, 40) + '…' : '', id: s.id, selected: s.id === (t.styleId || 'normal') })), { onPick: (it) => setStyle(pane, it.id) }));
+    // how full the context was on the last request (the model's own count), against the window when it is known
+    const lastUse = [...pane.messages].reverse().find((x) => x.role === 'assistant' && x.meta?.usage?.input_tokens)?.meta.usage;
+    const win = t.provider?.context_window || 0; const used = lastUse ? (lastUse.input_tokens || 0) + (lastUse.output_tokens || 0) : 0;
+    const gauge = used ? el('span', { class: 'ctx' + (win && used / win > 0.8 ? ' warn' : ''), title: win ? T('Context on the last request: {used} of {max} tokens. Long threads are summarized at 60%.', { used: used.toLocaleString(), max: win.toLocaleString() }) : T('Context on the last request: {used} tokens', { used: used.toLocaleString() }) }, win ? el('span', { class: 'ctxbar' }, el('i', { style: `width:${Math.min(100, Math.round(100 * used / win))}%` })) : null, win ? `${fmtK(used)} / ${fmtK(win)}` : fmtK(used)) : null;
     const bar = el('div', { class: 'bar' },
       el('button', { class: 'btn quiet icon sm', title: T('Attach a file or image'), onclick: () => fileInput.click() }, I('paperclip', 'sm')), fileInput,
       el('button', { class: 'btn quiet icon sm', title: T('New chat in this pane') + ' (Ctrl/⌘ Shift O)', onclick: () => newConv(pane) }, I('plus', 'sm')),
       styleBtn, permBtn,
       el('span', { class: 'spacer' }),
-      modelBtn,
+      gauge, modelBtn,
       live ? el('button', { class: 'stop', onclick: () => stopTurn(pane) }, I('stop', 'sm'), T('Stop')) : el('button', { class: 'send', title: T('Send'), onclick: () => send(pane), disabled: !t.provider }, I('send', 'sm')));
     box.append(bar); wrap.append(box);
     function renderPills() {
@@ -543,6 +628,7 @@
       if (pane.sel.thinking) pills.append(el('span', { class: 'chip info' }, I('brain', 'xs'), T(THINK_LABEL[pane.sel.thinking]), el('button', { title: T('Back to the provider default'), onclick: () => { pane.sel.thinking = ''; render(); } }, '✕')));
       if (pane.sel.research) pills.append(el('span', { class: 'chip info' }, I('globe', 'xs'), T('Research'), el('button', { title: T('Back to normal mode'), onclick: () => { pane.sel.research = false; render(); } }, '✕')));
       if (pane.sel.knowledge) pills.append(el('span', { class: 'chip' }, I('box', 'xs'), T('Knowledge'), el('button', { title: T('Back to automatic retrieval'), onclick: () => { pane.sel.knowledge = false; render(); } }, '✕')));
+      if (hasChatSettings(chatSettingsOf(pane))) pills.append(el('span', { class: 'chip info', style: 'cursor:pointer', title: T('Chat settings'), onclick: () => openChatSettings(pane) }, I('sliders', 'xs'), T('Chat settings')));
       if (t.style && t.style.id !== 'normal') pills.append(el('span', { class: 'chip' }, I('wand', 'xs'), t.style.name, el('button', { title: T('Back to the normal style'), onclick: () => setStyle(pane, '') }, '✕')));
       pane.attachments.forEach((a, i) => pills.append(el('span', { class: 'chip', title: a.path ? T('Saved to {path} · tools can use this path', { path: a.path }) : '' }, a.data_url ? '🖼' : '📄', a.name, el('button', { onclick: () => { pane.attachments.splice(i, 1); renderPills(); } }, '✕'))));
       pills.classList.toggle('hidden', !pills.children.length);
@@ -565,13 +651,25 @@
       { label: '/remember', sub: T('Save a memory: /remember <fact>'), icon: 'brain', insert: T('Remember this for future chats: ') },
       { label: '/clear', sub: T('Clear the draft'), icon: 'x', run: () => { pane.draft = ''; render(); } },
       { group: T('Assistants') }, ...S.st.assistants.map((a) => ({ label: `/assistant ${a.id}`, sub: a.name, icon: 'sparkles', run: () => setAssistant(pane, a.id) })),
+      ...((S.st.prompts || []).length ? [{ group: T('Prompts') }, ...S.st.prompts.map((p) => ({ label: `/${p.id}`, sub: p.name, icon: 'list', prompt: p }))] : []),
       { group: T('Styles') }, ...(S.st.styles || []).map((s) => ({ label: `/style ${s.id}`, sub: s.name, icon: 'wand', run: () => setStyle(pane, s.id) })),
       { group: T('Tools (inserts a request to use the tool)') }, ...S.st.tools.map((tl) => ({ label: `/tool ${tl.full_name}`, sub: (tl.description || '').slice(0, 50), icon: 'wrench', insert: T('Use the `{tool}` tool to ', { tool: tl.full_name }) }))];
-    return menu(ta, items, { filter: q, onPick: (it) => { if (it.insert) { ta.value = it.insert; pane.draft = ta.value; ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } else { ta.value = ''; pane.draft = ''; it.run(); } } });
+    return menu(ta, items, { filter: q, onPick: (it) => { if (it.prompt) { ta.value = ''; pane.draft = ''; usePrompt(pane, ta, it.prompt.text); return; } if (it.insert) { ta.value = it.insert; pane.draft = ta.value; ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } else { ta.value = ''; pane.draft = ''; it.run(); } } });
+  }
+  // a saved prompt into the message box; each {{name}} is asked for first (same name, same value)
+  function usePrompt(pane, ta, text) {
+    const names = [...new Set([...text.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map((x) => x[1]))];
+    const put = (v) => { ta.value = v; pane.draft = v; ta.style.height = 'auto'; ta.style.height = Math.min(260, ta.scrollHeight) + 'px'; ta.focus(); ta.setSelectionRange(v.length, v.length); };
+    if (!names.length) return put(text);
+    const inputs = names.map((n) => el('input', { class: 'input', 'data-var': n }));
+    const fill = () => { const vals = Object.fromEntries(inputs.map((i) => [i.dataset.var, i.value])); m.close(); put(text.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (all, n) => vals[n] ?? all)); };
+    inputs.forEach((i, k) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (k === inputs.length - 1) fill(); else inputs[k + 1].focus(); } }));
+    const m = modal({ title: T('Fill in the prompt'), body: names.map((n, k) => field(n, inputs[k])), footer: [el('button', { class: 'btn', onclick: () => m.close() }, T('Cancel')), el('button', { class: 'btn primary', onclick: fill }, T('Insert'))] });
+    setTimeout(() => inputs[0].focus(), 0);
   }
   function newConv(pane) { pane.convId = null; pane.conv = null; pane.messages = []; pane.branches = {}; pane.editing = null; S.view = 'chat'; ui.mobilePane = false; render(); $('.composerInput', paneEl(pane))?.focus(); }
   async function openConv(pane, id) {
-    const c = await api('/api/conversations/' + id); pane.convId = id; pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; pane.editing = null; S.view = 'chat'; ui.mobilePane = false; render();
+    const c = await api('/api/conversations/' + id); delete S.unread[id]; pane.convId = id; pane.conv = c; pane.messages = c.messages || []; pane.branches = c.branches || {}; pane.editing = null; S.view = 'chat'; ui.mobilePane = false; render();
     if ((S.convs.find((x) => x.id === id) || {}).running && !S.live[id]) attachStream(pane, id);  // a turn still running on the server: follow it
   }
   async function stopTurn(pane) { if (pane.convId) await api(`/api/chat/${pane.convId}/stop`, { method: 'POST' }).catch(() => {}); const live = S.live[pane.convId]; if (live?.abort) live.abort.abort(); }
@@ -583,6 +681,7 @@
 
   // ---------------------------------------------------------------- sending (one stream per conversation, many at once)
   const paneEl = (pane) => document.querySelectorAll('.pane-col')[S.panes.indexOf(pane)] || document;
+  const atBottom = (sc) => sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80;
   async function send(pane, forcedText) {
     const ta = $('.composerInput', paneEl(pane)); const text = (forcedText || ta?.value || '').trim(); if (!text) return;
     if (S.linkInputs && S.panes.length > 1 && !forcedText) { for (const p of S.panes) { p.draft = ''; startStream(p, text, p === pane ? pane.attachments.splice(0) : []); } return; }
@@ -595,8 +694,8 @@
     // a hosted provider without a saved key almost always answers 401: say so once, but still send (gateways and local servers need none)
     S.warnedNoKey = S.warnedNoKey || {};
     if (t.provider && t.provider.has_key === false && t.provider.kind !== 'agentserver' && !/127\.0\.0\.1|localhost|\[::1\]|\.local\b|^http:\/\/(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(t.provider.base_url || '') && !S.warnedNoKey[t.pid]) { S.warnedNoKey[t.pid] = true; toast(T('{name} has no API key saved. If the request fails with 401, add one in Settings → Model providers.', { name: t.provider.label || t.pid }), true); }
-    if (!pane.conv) { try { pane.conv = await api('/api/conversations', { method: 'POST', body: { assistant_id: t.aid, provider_id: t.pid, model: t.model } }); } catch (e) { return toast(e.message, true); } pane.convId = pane.conv.id; pane.messages = []; pane.branches = {}; await loadConvs(); }
-    const convId = pane.convId;
+    if (!pane.conv) { try { pane.conv = await api('/api/conversations', { method: 'POST', body: { assistant_id: t.aid, provider_id: t.pid, model: t.model } }); if (hasChatSettings(pane.sel.chatSettings || {})) pane.conv = await api('/api/conversations/' + pane.conv.id, { method: 'PATCH', body: { settings: pane.sel.chatSettings } }); pane.sel.chatSettings = null; } catch (e) { return toast(e.message, true); } pane.convId = pane.conv.id; pane.messages = []; pane.branches = {}; await loadConvs(); }
+    const convId = pane.convId; pane.follow = true;
     if (opts.branchFrom) { const idx = pane.messages.findIndex((m) => m.id === opts.branchFrom); if (idx >= 0) pane.messages = pane.messages.slice(0, idx); }
     const userNode = el('div', { class: 'turn-user' }, el('div', { class: 'bubble' }, text, ...atts.filter((a) => a.data_url).map((a) => el('img', { src: a.data_url }))), el('div', { class: 'av' }, userAvatar()));
     const { node, content } = assistantTurn(pane, t.model);
@@ -622,11 +721,28 @@
     try { await pumpStream(r, pane, live); } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); await endLive(pane, live); }
     return true;
   }
-  async function endLive(pane, live) { if (S.live[live.convId] !== live) return; delete S.live[live.convId]; await refreshConv(live.convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); refreshHealth(true); }
+  async function endLive(pane, live) { if (S.live[live.convId] !== live) return; delete S.live[live.convId]; if (!S.panes.some((p) => p.convId === live.convId)) S.unread[live.convId] = true; await refreshConv(live.convId); render(); if (pane.pendingEdit) finishSelectionEdit(pane); refreshHealth(true); notifyDone(pane, live.convId); }
+  // a turn that ends while this tab is in the background: a ● in the tab title until the tab is looked at, and a
+  // system notification when that is turned on in Settings → General
+  const BASE_TITLE = document.title;
+  const notifyOn = () => { try { return localStorage.getItem('missile_notify') === '1'; } catch { return false; } };
+  function notifyDone(pane, convId) {
+    if (!document.hidden) return;
+    document.title = '● ' + BASE_TITLE;
+    if (!notifyOn() || !('Notification' in window) || Notification.permission !== 'granted') return;
+    try { const c = S.convs.find((x) => x.id === convId); const n = new Notification(T('Answer ready'), { body: c?.title || T('New chat'), tag: convId, icon: '/static/brand/favicon.png' }); n.onclick = () => { window.focus(); openConv(pane, convId); n.close(); }; } catch {}
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) document.title = BASE_TITLE; });
+  async function setNotify(on) {
+    if (on && 'Notification' in window && Notification.permission !== 'granted') { const p = await Notification.requestPermission(); if (p !== 'granted') { toast(T('The browser did not allow notifications. Allow them for this site and try again.'), true); render(); return; } }
+    try { localStorage.setItem('missile_notify', on ? '1' : '0'); } catch {}
+    toast(on ? T('Notifications on') : T('Notifications off')); render();
+  }
   async function pumpStream(r, pane, live) {
     const { node, content } = live;
     const scrollOf = () => { const inner = node.closest('.chat-inner'); return inner ? inner.parentElement : null; };
-    const flush = () => { if (!live.mdEl) { live.mdEl = el('div', { class: 'md cursor' }); content.append(live.mdEl); } live.mdEl.innerHTML = md(live.textBuf); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; };
+    const stick = () => { const sc = scrollOf(); if (sc && pane.follow !== false) sc.scrollTop = sc.scrollHeight; };
+    const flush = () => { if (!live.mdEl) { live.mdEl = el('div', { class: 'md cursor' }); content.append(live.mdEl); } live.mdEl.innerHTML = md(live.textBuf); stick(); };
     const status = (text, keep) => { if (!text) { live.statusEl?.remove(); live.statusEl = null; return; } if (!live.statusEl) { live.statusEl = el('div', { class: 'status-line' }); content.append(live.statusEl); } live.statusEl.innerHTML = ''; live.statusEl.append(I('activity', 'xs'), text); if (!keep) setTimeout(() => { if (live.statusEl && live.statusEl.textContent === text) { live.statusEl.remove(); live.statusEl = null; } }, 6000); };
     try {
       const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
@@ -645,9 +761,9 @@
       switch (ev.type) {
         case 'text_delta': live.textBuf += ev.text; flush(); break;
         case 'thinking_delta': live.thinkBuf += ev.text; if (!live.thinkEl) { const d = el('details', { class: 'think', open: true }, el('summary', {}, I('brain', 'sm'), T('Thinking'))); live.thinkEl = el('div', { class: 'tbody' }); d.append(live.thinkEl); content.prepend(d); } live.thinkEl.textContent = live.thinkBuf; break;
-        case 'tool_call': { if (live.mdEl) live.mdEl.classList.remove('cursor'); live.mdEl = null; live.textBuf = ''; const c = toolCard(ev, null); live.cards[ev.id] = { card: c, call: ev }; content.append(c); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; break; }
+        case 'tool_call': { if (live.mdEl) live.mdEl.classList.remove('cursor'); live.mdEl = null; live.textBuf = ''; const c = toolCard(ev, null); live.cards[ev.id] = { card: c, call: ev }; content.append(c); stick(); break; }
         case 'tool_result': { const k = live.cards[ev.id]; const nc = toolCard(k ? k.call : { name: ev.name, arguments: {} }, ev); if (k) k.card.replaceWith(nc); else content.append(nc); live.cards[ev.id] = { card: nc, call: k ? k.call : { name: ev.name } }; if (S.drawer.open && /write|edit|create|move|delete|run_shell/.test(ev.name)) loadTree(S.drawer.path); break; }
-        case 'approval_required': { const a = el('div', { class: 'approval', 'data-approval': ev.id }, el('div', { class: 'ttl' }, I('alert', 'sm'), T('{tool} wants to run', { tool: ev.name }), el('span', { class: 'muted tiny', style: 'font-weight:400' }, ev.reason || '')), el('pre', {}, JSON.stringify(ev.arguments, null, 1).slice(0, 2000)), el('div', { class: 'row' }, ...[[T('Allow once'), 'allow', 'btn primary sm'], [T('Allow in this chat'), 'allow_session', 'btn sm'], [T('Always allow'), 'allow_always', 'btn sm'], [T('Deny'), 'deny', 'btn danger sm']].map(([l, d, cls]) => el('button', { class: cls, onclick: async () => { await api('/api/approvals/' + ev.id, { method: 'POST', body: { decision: d } }).catch((e) => toast(e.message, true)); a.remove(); } }, l)))); content.append(a); const sc = scrollOf(); if (sc) sc.scrollTop = sc.scrollHeight; break; }
+        case 'approval_required': { const a = el('div', { class: 'approval', 'data-approval': ev.id }, el('div', { class: 'ttl' }, I('alert', 'sm'), T('{tool} wants to run', { tool: ev.name }), el('span', { class: 'muted tiny', style: 'font-weight:400' }, ev.reason || '')), el('pre', {}, JSON.stringify(ev.arguments, null, 1).slice(0, 2000)), el('div', { class: 'row' }, ...[[T('Allow once'), 'allow', 'btn primary sm'], [T('Allow in this chat'), 'allow_session', 'btn sm'], [T('Always allow'), 'allow_always', 'btn sm'], [T('Deny'), 'deny', 'btn danger sm']].map(([l, d, cls]) => el('button', { class: cls, onclick: async () => { await api('/api/approvals/' + ev.id, { method: 'POST', body: { decision: d } }).catch((e) => toast(e.message, true)); a.remove(); } }, l)))); content.append(a); stick(); break; }
         case 'remote_tool': status(`${ev.event} ${ev.name || ''}`, true); break;
         case 'status': {
           const d = ev.data || {};
@@ -978,17 +1094,28 @@
   // ---------------------------------------------------------------- settings
   const SETTINGS_NAV = [
     { grp: 'Models' }, { id: 'providers', label: 'Model providers', icon: 'cloud' }, { id: 'default', label: 'Defaults & presets', icon: 'box' },
-    { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'knowledge', label: 'Knowledge base', icon: 'box' }, { id: 'memory', label: 'Memory', icon: 'brain' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'styles', label: 'Writing styles', icon: 'wand' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
+    { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'knowledge', label: 'Knowledge base', icon: 'box' }, { id: 'memory', label: 'Memory', icon: 'brain' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'styles', label: 'Writing styles', icon: 'wand' }, { id: 'prompts', label: 'Prompt library', icon: 'list' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
     { grp: 'Studio' }, { id: 'audit', label: 'Audit log', icon: 'list' }, { id: 'general', label: 'General', icon: 'settings' },
   ];
+  // what each settings page holds, for the settings search (English here, Korean in i18n.js)
+  const SETTINGS_KEYS = { providers: 'api key endpoint url custom model openai anthropic gemini ollama vllm test', default: 'default new chat preset quick model', mcp: 'mcp server tool stdio http sse wake restart import', tools: 'policy permission allow ask block shell file web search catalog workspace', knowledge: 'knowledge documents folder index embeddings search', memory: 'memory remember recall', assistants: 'assistant system prompt temperature max tokens tools', styles: 'writing style tone', prompts: 'prompt library template variables slash command', agents: 'agent server bridge device', audit: 'audit log tool calls history export csv', general: 'general language theme appearance text size wide notifications keyboard shortcuts session sign out version' };
   function renderSettings() {
     const root = el('div', { class: 'settings' });
     const nav = el('div', { class: 'snav' }, el('h2', {}, T('Settings')));
     nav.append(el('button', { onclick: () => { S.view = 'chat'; render(); } }, I('chat', 'sm'), T('Back to chat')));
-    for (const n of SETTINGS_NAV) { if (n.grp) { nav.append(el('div', { class: 'grp' }, T(n.grp))); continue; } nav.append(el('button', { class: S.settingsPage === n.id ? 'active' : '', onclick: () => { S.settingsPage = n.id; render(); } }, I(n.icon, 'sm'), T(n.label))); }
+    // search the settings: page names and what each page holds, in both languages; Enter opens the first match
+    const find = el('input', { class: 'input sfind', placeholder: T('Search settings'), value: S.settingsQuery || '' });
+    nav.append(find);
+    const navItems = [];
+    for (const n of SETTINGS_NAV) { if (n.grp) { const g = el('div', { class: 'grp' }, T(n.grp)); nav.append(g); navItems.push({ g }); continue; } const b = el('button', { class: S.settingsPage === n.id ? 'active' : '', onclick: () => { S.settingsPage = n.id; render(); } }, I(n.icon, 'sm'), T(n.label)); nav.append(b); const label = [n.label, T(n.label)].join(' ').toLowerCase(); navItems.push({ b, label, hay: [label, SETTINGS_KEYS[n.id] || '', T(SETTINGS_KEYS[n.id] || '')].join(' ').toLowerCase() }); }
+    const filterNav = () => { const q = find.value.trim().toLowerCase(); S.settingsQuery = find.value; let group = null, groupHas = false; for (const it of [...navItems, { g: null }]) { if ('g' in it) { if (group) group.style.display = groupHas || !q ? '' : 'none'; group = it.g; groupHas = false; continue; } const hit = !q || q.split(/\s+/).every((w) => it.hay.includes(w)); it.b.style.display = hit ? '' : 'none'; if (hit) groupHas = true; } };
+    find.addEventListener('input', filterNav);
+    // Enter opens the page whose name matches first, otherwise the first page that mentions the words
+    find.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const ws = find.value.trim().toLowerCase().split(/\s+/); const shown = navItems.filter((it) => it.b && it.b.style.display !== 'none'); const best = shown.find((it) => ws.every((w) => it.label.includes(w))) || shown[0]; if (best) best.b.click(); } else if (e.key === 'Escape') { find.value = ''; filterNav(); } });
+    filterNav();
     root.append(nav);
     const content = el('div', { class: 'scontent' }); root.append(content);
-    ({ providers: pageProviders, default: pageDefault, mcp: pageMcp, tools: pageTools, knowledge: pageKnowledge, memory: pageMemory, assistants: pageAssistants, styles: pageStyles, agents: pageAgents, audit: pageAudit, general: pageGeneral }[S.settingsPage] || pageProviders)(content);
+    ({ providers: pageProviders, default: pageDefault, mcp: pageMcp, tools: pageTools, knowledge: pageKnowledge, memory: pageMemory, assistants: pageAssistants, styles: pageStyles, prompts: pagePrompts, agents: pageAgents, audit: pageAudit, general: pageGeneral }[S.settingsPage] || pageProviders)(content);
     return root;
   }
   const page = (title, sub, ...kids) => el('div', { class: 'page' }, el('h1', {}, T(title), sub ? el('small', {}, T(sub)) : null), ...kids);
@@ -1001,7 +1128,7 @@
     if (!S.st.providers.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px' }, T('No providers yet.')));
     const detail = el('div');
     const p = providerOf(selId);
-    if (p) detail.append(providerDetail(p)); else detail.append(el('div', { class: 'card' }, el('h3', {}, T('Pick a preset to begin')), el('p', { class: 'muted', style: 'margin:0' }, T('OpenAI, Anthropic, Gemini, DashScope, OpenRouter, Groq, DeepSeek, Mistral, xAI, or a local Ollama, LM Studio, vLLM or llama.cpp. Any OpenAI-compatible endpoint works.')), el('div', {}, el('button', { class: 'btn primary', onclick: addProviderModal }, I('plus', 'sm'), T('Add provider')))));
+    if (p) detail.append(providerDetail(p)); else detail.append(el('div', { class: 'card' }, el('h3', {}, T('Pick a preset to begin')), el('p', { class: 'muted', style: 'margin:0' }, T('OpenAI, Anthropic, Gemini, DashScope, OpenRouter, Groq, DeepSeek, Mistral, xAI, or a local Ollama, LM Studio, vLLM or llama.cpp. Any OpenAI-compatible endpoint works.')), el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: customEndpointModal }, I('link', 'sm'), T('Custom endpoint')), el('button', { class: 'btn', onclick: addProviderModal }, I('plus', 'sm'), T('Add provider')))));
     content.append(page('Model providers', 'Where your models come from', el('div', { class: 'split' }, list, detail)));
   }
   function providerDetail(p) {
@@ -1018,10 +1145,13 @@
     card.append(testOut);
     const models = [...new Set([p.default_model, ...(p.models || [])].filter(Boolean))];
     const modelsBox = el('div', { class: 'pill-list' });
-    const renderModels = () => { modelsBox.innerHTML = ''; for (const m of models.slice(0, 300)) modelsBox.append(el('span', { class: 'chip' + (m === draft.default_model ? ' sel' : ''), title: T('Set as the default model'), onclick: () => { draft.default_model = m; renderModels(); } }, shortModel(m))); if (models.length > 300) modelsBox.append(el('span', { class: 'muted tiny' }, T('+{n} more', { n: models.length - 300 }))); if (!models.length) modelsBox.append(el('span', { class: 'muted tiny' }, T('No models yet. Find them, or type one below.'))); };
+    // click a model to make it the default, ✕ to drop it from the picker (Save keeps the change); a filter for long lists
+    const mFilter = el('input', { class: 'input', placeholder: T('Filter models…'), oninput: () => renderModels() });
+    const dropModel = (m) => { models.splice(models.indexOf(m), 1); draft.models = models.slice(); if (draft.default_model === m) draft.default_model = models[0] || ''; renderModels(); };
+    const renderModels = () => { modelsBox.innerHTML = ''; const q = mFilter.value.trim().toLowerCase(); const shown = models.filter((m) => !q || m.toLowerCase().includes(q)); for (const m of shown.slice(0, 300)) modelsBox.append(el('span', { class: 'chip mchip' + (m === draft.default_model ? ' sel' : ''), title: T('Set as the default model'), onclick: () => { draft.default_model = m; renderModels(); } }, shortModel(m), el('button', { class: 'x', title: T('Remove from the list'), onclick: (e) => { e.stopPropagation(); dropModel(m); } }, '✕'))); if (shown.length > 300) modelsBox.append(el('span', { class: 'muted tiny' }, T('+{n} more', { n: shown.length - 300 }))); if (!models.length) modelsBox.append(el('span', { class: 'muted tiny' }, T('No models yet. Find them, or type one below.'))); else if (!shown.length) modelsBox.append(el('span', { class: 'muted tiny' }, T('No matches'))); };
     renderModels();
     const addModel = el('input', { class: 'input', placeholder: T('Add a model id by hand'), onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); const v = addModel.value.trim(); if (v) { models.unshift(v); draft.models = [...new Set([...(draft.models || []), v])]; if (!draft.default_model) draft.default_model = v; addModel.value = ''; renderModels(); } } } });
-    card.append(el('div', { class: 'sect' }, `${T('Models')} · ${models.length}`), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: async () => { try { const r = await api(`/api/providers/${encodeURIComponent(p.id)}/models`, { method: 'POST' }); toast(T('{n} models', { n: r.models.length })); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('refresh', 'sm'), p.kind === 'agentserver' ? T('Sync agents') : T('Find models')), addModel), modelsBox);
+    card.append(el('div', { class: 'sect' }, `${T('Models')} · ${models.length}`), el('div', { class: 'row' }, el('button', { class: 'btn', onclick: async () => { try { const r = await api(`/api/providers/${encodeURIComponent(p.id)}/models`, { method: 'POST' }); toast(T('{n} models', { n: r.models.length })); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('refresh', 'sm'), p.kind === 'agentserver' ? T('Sync agents') : T('Find models')), addModel), models.length > 12 ? mFilter : null, modelsBox, models.length ? el('div', { class: 'muted tiny' }, T('Click a model to make it the default, ✕ to remove it from the picker. Save keeps the change.')) : null);
     const adv = el('details', {}, el('summary', { class: 'muted', style: 'cursor:pointer' }, T('Advanced: extra request body, headers, label, TLS')));
     adv.append(el('div', { class: 'grid2', style: 'margin-top:10px' }, field(T('Label'), el('input', { class: 'input', value: p.label || '', oninput: (e) => { draft.label = e.target.value; } })), field(T('Allow self-signed TLS'), switchEl(!!p.allow_insecure_tls, (v) => { draft.allow_insecure_tls = v; })), field(T('Tool calls through the prompt'), switchEl(!!p.tools_via_prompt, (v) => { draft.tools_via_prompt = v; }), T('For servers that reject tool definitions, such as vLLM without a tool-call parser. Tools are described in the prompt and <tool_call> blocks are read from the text. Turns on by itself when such a server answers 400.')), field(T('Context window (tokens)'), el('input', { class: 'input', type: 'number', value: p.context_window || '', placeholder: T('auto'), oninput: (e) => { draft.context_window = parseInt(e.target.value || '0', 10) || 0; } }), T('Long threads are summarized at 60% of this.')), field(T('Extra body (JSON)'), el('input', { class: 'input', value: Object.keys(p.extra_body || {}).length ? JSON.stringify(p.extra_body) : '', placeholder: '{"enable_thinking": false}', oninput: (e) => { draft._extra = e.target.value; } }), T('Merged into every request. The thinking switch in chat adds its own setting on top of this.')), field(T('Headers (JSON)'), el('input', { class: 'input', value: Object.keys(p.headers || {}).length ? JSON.stringify(p.headers) : '', placeholder: '{"X-Title": "missile"}', oninput: (e) => { draft._headers = e.target.value; } })), field(T('Endpoint file'), el('input', { class: 'input', value: p.endpoint_file || '', placeholder: 'D:/path/to/endpoint.txt', oninput: (e) => { draft.endpoint_file = e.target.value.trim(); } }), T('A file with "base_url|model|api_key" that this provider follows. When the server moves (a recreated GPU pod, for example), rewriting the file moves the provider too.')), field(T('Wake server'), el('select', { class: 'select', onchange: (e) => { draft.wake_server = e.target.value; } }, el('option', { value: '' }, T('(none)')), ...(S.st.mcp || []).filter((m) => m.config?.wake_command).map((m) => el('option', { value: m.name, selected: m.name === p.wake_server }, m.name))), T('When this provider is down, the chat offers a Wake button that runs the wake command of this MCP server.'))));
     card.append(adv);
@@ -1030,8 +1160,79 @@
   }
   function addProviderModal() {
     const grid = el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px' });
-    const m = modal({ title: T('Add a provider'), body: [el('p', { class: 'muted', style: 'margin:0' }, T('Pick a preset. You can change everything afterwards.')), grid], wide: true });
+    const custom = el('button', { class: 'btn custom-ep', onclick: () => { m.close(); customEndpointModal(); } }, el('span', { class: 'em' }, I('link', 'sm')), el('span', { style: 'min-width:0' }, el('div', { style: 'font-weight:700' }, T('Custom endpoint')), el('div', { class: 'muted tiny' }, T('Any server with an OpenAI, Anthropic or Gemini API. Paste its URL and key; the format and models are found for you.'))));
+    const m = modal({ title: T('Add a provider'), body: [custom, el('div', { class: 'sect' }, T('Or start from a preset')), grid], wide: true });
     for (const pr of S.st.presets) grid.append(el('button', { class: 'btn', style: 'height:auto;padding:10px 12px;justify-content:flex-start;text-align:left;gap:10px', onclick: () => { m.close(); createFromPreset(pr); } }, el('span', { class: 'em', style: `${avatarStyle(pr.id)};width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;flex:none` }, initials(pr.label)), el('span', { style: 'min-width:0' }, el('div', { class: 'truncate', style: 'font-weight:600' }, pr.label), el('div', { class: 'muted tiny truncate' }, pr.needs_key ? T('API key') : T('No key · local')))));
+  }
+  // ---- a provider from any endpoint: paste a bare host, a base URL or a full request URL and a key; the server
+  // tries the likely API format and base URL, then the models it lists can be kept or dropped
+  const slugId = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  function customEndpointModal() {
+    const d = { label: '', id: '', url: '', kind: 'auto', api_key: '', headers: '', tls: false, viaPrompt: false, ctx: '' };
+    let probe = null; let keep = new Set(); let def = ''; let idTouched = false;
+    const idIn = el('input', { class: 'input', placeholder: 'my-server', oninput: (e) => { idTouched = true; d.id = slugId(e.target.value); } });
+    const nameIn = el('input', { class: 'input', placeholder: T('e.g. My GPU server'), oninput: (e) => { d.label = e.target.value; if (!idTouched) { d.id = slugId(d.label); idIn.value = d.id; } } });
+    const urlIn = el('input', { class: 'input', placeholder: 'http://localhost:11434 · https://host/v1/chat/completions', oninput: (e) => { d.url = e.target.value; probe = null; result.innerHTML = ''; } });
+    const kindSel = el('select', { class: 'select', onchange: (e) => { d.kind = e.target.value; probe = null; result.innerHTML = ''; } }, ...[['auto', T('Detect from the URL')], ['openai', T('OpenAI-compatible')], ['anthropic', 'Anthropic'], ['gemini', 'Google Gemini']].map(([v, l]) => el('option', { value: v }, l)));
+    const keyIn = el('input', { class: 'input', type: 'password', placeholder: T('Leave empty if the server needs no key'), oninput: (e) => { d.api_key = e.target.value; } });
+    const manualIn = el('input', { class: 'input', placeholder: T('A model id, if the server does not list its models') });
+    const result = el('div', { class: 'probe' });
+    const checkBtn = el('button', { class: 'btn', onclick: () => check() }, I('activity', 'sm'), T('Check and find models'));
+    const adv = el('details', {}, el('summary', { class: 'muted', style: 'cursor:pointer' }, T('Advanced: headers, TLS, tool calls, context window')),
+      el('div', { style: 'display:grid;gap:12px;margin-top:10px' },
+        field(T('Headers (KEY=VALUE per line)'), el('textarea', { class: 'textarea', style: 'min-height:56px', oninput: (e) => { d.headers = e.target.value; } })),
+        el('div', { class: 'grid2' }, field(T('Allow self-signed TLS'), switchEl(false, (v) => { d.tls = v; })), field(T('Tool calls through the prompt'), switchEl(false, (v) => { d.viaPrompt = v; }), T('For servers that reject tool definitions. Turns on by itself when such a server answers 400.'))),
+        field(T('Context window (tokens)'), el('input', { class: 'input', type: 'number', placeholder: T('auto'), oninput: (e) => { d.ctx = e.target.value; } }))));
+    function renderModels() {
+      result.innerHTML = '';
+      if (!probe) return;
+      if (!probe.ok) {
+        result.append(el('div', { class: 'error-line' }, T('Could not reach it: {error}', { error: (probe.error || '').slice(0, 300) })), el('div', { class: 'muted tiny' }, T('Tried: {list}', { list: (probe.tried || []).map((t) => `${t.kind} ${t.base_url}`).join(' · ') })), field(T('Model id'), manualIn, T('You can still save it with a model id and fix the address later.')));
+        return;
+      }
+      const models = probe.models || [];
+      result.append(el('div', { class: 'okline' }, I('check', 'sm'), T('Connected · {kind} · {n} models · {ms}ms', { kind: probe.kind === 'openai' ? T('OpenAI-compatible') : probe.kind, n: probe.count, ms: probe.ms }), el('span', { class: 'mono muted tiny', style: 'margin-left:6px' }, probe.base_url)));
+      if (!models.length) { result.append(field(T('Model id'), manualIn, T('The server listed no models. Type the one to use.'))); return; }
+      const filter = el('input', { class: 'input', placeholder: T('Filter models…') });
+      const list = el('div', { class: 'mlist' });
+      const head = el('div', { class: 'row tiny' }, el('span', { class: 'muted' }, T('Keep the models to show in the picker. ★ marks the default.')), el('span', { class: 'spacer' }), el('button', { class: 'btn quiet sm', onclick: () => { keep = new Set(models); draw(); } }, T('Keep all')), el('button', { class: 'btn quiet sm', onclick: () => { keep = new Set(def ? [def] : []); draw(); } }, T('Clear')));
+      const draw = () => {
+        list.innerHTML = ''; const q = filter.value.trim().toLowerCase();
+        for (const m of models.filter((x) => !q || x.toLowerCase().includes(q)).slice(0, 400)) {
+          list.append(el('label', { class: 'mrow' + (keep.has(m) ? ' on' : '') }, el('input', { type: 'checkbox', checked: keep.has(m) || undefined, onchange: (e) => { if (e.target.checked) keep.add(m); else { keep.delete(m); if (def === m) def = ''; } draw(); } }), el('span', { class: 'mono truncate' }, m), el('button', { class: 'star' + (def === m ? ' on' : ''), title: T('Use as the default model'), onclick: (e) => { e.preventDefault(); def = m; keep.add(m); draw(); } }, def === m ? '★' : '☆')));
+        }
+      };
+      filter.addEventListener('input', draw);
+      result.append(head, filter, list); draw();
+    }
+    async function check() {
+      if (!d.url.trim()) { toast(T('Enter the endpoint URL.'), true); return null; }
+      checkBtn.disabled = true; result.innerHTML = ''; result.append(el('div', { class: 'muted tiny' }, T('Checking…')));
+      try { probe = await api('/api/providers/probe', { method: 'POST', body: { url: d.url, kind: d.kind, api_key: d.api_key, headers: kv(d.headers), allow_insecure_tls: d.tls } }); }
+      catch (e) { probe = { ok: false, error: e.message, tried: [] }; }
+      checkBtn.disabled = false;
+      if (probe.ok) { const ms = probe.models || []; keep = new Set(ms); def = ms[0] || ''; }
+      renderModels();
+      return probe;
+    }
+    async function save() {
+      if (!d.label.trim()) { toast(T('Enter a name.'), true); nameIn.focus(); return; }
+      if (!probe) await check();
+      if (!probe) return;
+      let id = d.id || slugId(d.label) || 'custom'; const base = id; let n = 2; while (providerOf(id)) id = `${base}-${n++}`;
+      const manual = manualIn.value.trim();
+      const models = probe.ok && (probe.models || []).length ? [...keep] : (manual ? [manual] : []);
+      const body = { id, label: d.label.trim(), kind: probe.kind || (d.kind === 'auto' ? 'openai' : d.kind), base_url: probe.base_url || d.url.trim(), api_key: d.api_key, models, default_model: def && keep.has(def) ? def : (models[0] || ''), headers: kv(d.headers), allow_insecure_tls: d.tls, tools_via_prompt: d.viaPrompt };
+      if (parseInt(d.ctx, 10) > 0) body.context_window = parseInt(d.ctx, 10);
+      try { await api('/api/providers', { method: 'POST', body }); m.close(); S.sel.providerId = id; await loadState(); render(); toast(T('Added {name}', { name: body.label })); } catch (e) { toast(e.message, true); }
+    }
+    const m = modal({ title: T('Custom endpoint'), wide: true, body: [
+      el('div', { class: 'grid2' }, field(T('Name'), nameIn), field(T('Id'), idIn, T('Used in URLs and tool settings. Filled in from the name.'))),
+      field(T('Endpoint URL'), urlIn, T('A server address, a base URL or a full request URL. Request paths such as /chat/completions are removed for you.')),
+      el('div', { class: 'grid2' }, field(T('API format'), kindSel), field(T('API key'), keyIn)),
+      el('div', {}, checkBtn), result, adv],
+      footer: [el('button', { class: 'btn', onclick: () => m.close() }, T('Cancel')), el('button', { class: 'btn primary', onclick: save }, I('check', 'sm'), T('Save'))] });
+    setTimeout(() => nameIn.focus(), 0);
   }
   function createFromPreset(pr) {
     let id = pr.id; let n = 2; while (providerOf(id)) id = `${pr.id}-${n++}`;
@@ -1066,6 +1267,22 @@
     const s = sel ? styles.find((x) => x.id === sel) : { id: '', name: '', prompt: '' }; const d = { ...s };
     const card = el('div', { class: 'card' }, el('h3', {}, sel ? T('Edit {name}', { name: s.name }) : T('New style')), el('div', { class: 'grid2' }, field(T('Id'), el('input', { class: 'input', value: d.id, disabled: !!sel, oninput: (e) => { d.id = e.target.value.trim(); } })), field(T('Name'), el('input', { class: 'input', value: d.name, oninput: (e) => { d.name = e.target.value; } }))), field(T('Instructions'), el('textarea', { class: 'textarea', style: 'min-height:140px', value: d.prompt || '', placeholder: T('How should answers sound? Paste a sample of your own writing and say "write like this".'), oninput: (e) => { d.prompt = e.target.value; } }), T('Added to the system prompt as "Writing style: …". Instructions in the chat still take priority.')), el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/styles', { method: 'POST', body: d }); toast(T('Saved')); S.sel.newStyle = false; S.sel.styleId = d.id; await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('check', 'sm'), T('Save')), el('span', { class: 'spacer' }), sel && sel !== 'normal' ? el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(T('Delete the style {name}?', { name: s.name }))) { await api('/api/styles/' + sel, { method: 'DELETE' }); S.sel.styleId = ''; await loadState(); render(); } } }, I('trash', 'sm'), T('Delete')) : null));
     content.append(page('Writing styles', 'Tone presets you can switch per chat without changing the assistant', el('div', { class: 'split' }, list, card)));
+  }
+  function pagePrompts(content) {
+    const list = el('div', { class: 'listbox' });
+    const prompts = S.st.prompts || []; const sel = S.sel.newPrompt ? null : (prompts.some((p) => p.id === S.sel.promptId) ? S.sel.promptId : prompts[0]?.id);
+    list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: () => { S.sel.newPrompt = true; render(); } }, I('plus', 'sm'), T('New prompt'))));
+    for (const p of prompts) list.append(el('div', { class: 'lrow' + (p.id === sel ? ' active' : ''), onclick: () => { S.sel.newPrompt = false; S.sel.promptId = p.id; render(); } }, el('div', { class: 'em', style: 'background:var(--bg-subtle);color:var(--fg)' }, I('list', 'sm')), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, p.name), el('div', { class: 'sub truncate mono' }, '/' + p.id))));
+    if (!prompts.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px' }, T('No prompts yet.')));
+    const p = sel ? prompts.find((x) => x.id === sel) : { id: '', name: '', text: '' }; const d = { ...p };
+    const preview = el('div', { class: 'muted tiny' });
+    const showVars = () => { const names = [...new Set([...(d.text || '').matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map((x) => x[1]))]; preview.textContent = names.length ? T('Asked when inserted: {names}', { names: names.join(', ') }) : ''; };
+    const card = el('div', { class: 'card' }, el('h3', {}, sel ? T('Edit {name}', { name: p.name }) : T('New prompt')),
+      el('div', { class: 'grid2' }, field(T('Command'), el('input', { class: 'input', value: d.id, disabled: !!sel, placeholder: 'summary', oninput: (e) => { d.id = e.target.value.trim(); } }), T('Typed after / in the message box.')), field(T('Name'), el('input', { class: 'input', value: d.name, oninput: (e) => { d.name = e.target.value; } }))),
+      field(T('Prompt'), el('textarea', { class: 'textarea', style: 'min-height:160px', value: d.text || '', placeholder: T('e.g. Summarize {{topic}} in {{count}} bullet points for a manager.'), oninput: (e) => { d.text = e.target.value; showVars(); } }), T('Words in {{double braces}} become blanks you fill in when the prompt is inserted.')), preview,
+      el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: async () => { if (!d.id || !d.name) return toast(T('Enter a command and a name.'), true); try { await api('/api/prompts', { method: 'POST', body: d }); toast(T('Saved')); S.sel.newPrompt = false; S.sel.promptId = d.id; await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('check', 'sm'), T('Save')), el('span', { class: 'spacer' }), sel ? el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(T("Delete the prompt '{name}'?", { name: p.name }))) { await api('/api/prompts/' + encodeURIComponent(sel), { method: 'DELETE' }); S.sel.promptId = ''; await loadState(); render(); } } }, I('trash', 'sm'), T('Delete')) : null));
+    showVars();
+    content.append(page('Prompt library', 'Saved prompts you insert with / in any chat', el('div', { class: 'split' }, list, card)));
   }
   function pageMcp(content) {
     const list = el('div', { class: 'listbox' });
@@ -1141,7 +1358,7 @@
     const sel = S.sel.newAssistant ? null : (ids.includes(S.sel.assistantId) ? S.sel.assistantId : ids[0]);
     list.append(el('div', { class: 'lhead' }, el('button', { class: 'btn primary sm', style: 'width:100%', onclick: () => { S.sel.newAssistant = true; render(); } }, I('plus', 'sm'), T('New assistant'))));
     for (const a of S.st.assistants) list.append(el('div', { class: 'lrow' + (a.id === sel ? ' active' : ''), onclick: () => { S.sel.newAssistant = false; S.sel.assistantId = a.id; render(); } }, el('div', { class: 'em', style: 'background:transparent' }, assistantGlyph(a)), el('div', { style: 'min-width:0;flex:1' }, el('div', { class: 'ttl truncate' }, a.name), el('div', { class: 'sub truncate' }, a.model ? `${a.provider || T('default')} / ${shortModel(a.model)}` : T('Default model'))), S.st.default.assistant === a.id ? el('span', { class: 'chip primary' }, T('default')) : null));
-    const a = sel ? assistantOf(sel) : { id: '', name: '', emoji: '🤖', system_prompt: '', provider: '', model: '', tools: 'all', max_iterations: 25 };
+    const a = sel ? assistantOf(sel) : { id: '', name: '', emoji: '🤖', system_prompt: '', provider: '', model: '', tools: 'all', max_iterations: 25, temperature: null, max_tokens: null };
     const d = { ...a, tools: Array.isArray(a.tools) ? a.tools.join(', ') : a.tools };
     const card = el('div', { class: 'card' },
       el('h3', {}, sel ? T('Edit {name}', { name: a.name }) : T('New assistant')),
@@ -1150,7 +1367,8 @@
       field(T('System prompt'), el('textarea', { class: 'textarea', style: 'min-height:160px', value: d.system_prompt || '', oninput: (e) => { d.system_prompt = e.target.value; } })),
       el('div', { class: 'grid2' }, field(T('Provider (optional)'), el('select', { class: 'select', onchange: (e) => { d.provider = e.target.value; } }, el('option', { value: '' }, T('(default)')), ...S.st.providers.map((p) => el('option', { value: p.id, selected: p.id === d.provider }, p.label || p.id)))), field(T('Model (optional)'), el('input', { class: 'input', value: d.model || '', oninput: (e) => { d.model = e.target.value.trim(); } }))),
       el('div', { class: 'grid2' }, field(T('Tools'), el('input', { class: 'input', value: d.tools, placeholder: 'all · none · local__*, filesystem__read_file', oninput: (e) => { d.tools = e.target.value; } })), field(T('Max tool iterations'), el('input', { class: 'input', type: 'number', value: d.max_iterations || 25, oninput: (e) => { d.max_iterations = parseInt(e.target.value || '25', 10); } }))),
-      el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: async () => { const tv = (d.tools || '').trim(); const tools = !tv || tv === 'all' ? 'all' : tv === 'none' ? 'none' : tv.split(',').map((s) => s.trim()).filter(Boolean); try { await api('/api/assistants', { method: 'POST', body: { id: d.id, name: d.name, emoji: d.emoji, system_prompt: d.system_prompt, provider: d.provider, model: d.model, tools, max_iterations: d.max_iterations } }); toast(T('Saved')); S.sel.newAssistant = false; S.sel.assistantId = d.id; await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('check', 'sm'), T('Save')), sel ? el('button', { class: 'btn', onclick: async () => { await api('/api/default', { method: 'POST', body: { assistant: a.id } }); await loadState(); render(); } }, T('Use as default')) : null, el('span', { class: 'spacer' }), sel && a.id !== 'default' ? el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(T('Delete the assistant {name}?', { name: a.name }))) { await api('/api/assistants/' + a.id, { method: 'DELETE' }); S.sel.assistantId = ''; await loadState(); render(); } } }, I('trash', 'sm'), T('Delete')) : null));
+      el('div', { class: 'grid2' }, field(T('Temperature'), el('input', { class: 'input', type: 'number', min: 0, max: 2, step: 0.1, value: d.temperature ?? '', placeholder: T('Provider default'), oninput: (e) => { d.temperature = e.target.value; } }), T('Lower is steadier, higher is more varied. Empty uses the provider default.')), field(T('Max output tokens'), el('input', { class: 'input', type: 'number', min: 1, value: d.max_tokens ?? '', placeholder: T('Provider default'), oninput: (e) => { d.max_tokens = e.target.value; } }), T('The longest answer per request. Empty uses the provider default.'))),
+      el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: async () => { const tv = (d.tools || '').trim(); const tools = !tv || tv === 'all' ? 'all' : tv === 'none' ? 'none' : tv.split(',').map((s) => s.trim()).filter(Boolean); try { await api('/api/assistants', { method: 'POST', body: { id: d.id, name: d.name, emoji: d.emoji, system_prompt: d.system_prompt, provider: d.provider, model: d.model, tools, max_iterations: d.max_iterations, temperature: d.temperature === '' || d.temperature == null ? null : parseFloat(d.temperature), max_tokens: d.max_tokens === '' || d.max_tokens == null ? null : parseInt(d.max_tokens, 10) } }); toast(T('Saved')); S.sel.newAssistant = false; S.sel.assistantId = d.id; await loadState(); render(); } catch (e) { toast(e.message, true); } } }, I('check', 'sm'), T('Save')), sel ? el('button', { class: 'btn', onclick: async () => { await api('/api/default', { method: 'POST', body: { assistant: a.id } }); await loadState(); render(); } }, T('Use as default')) : null, el('span', { class: 'spacer' }), sel && a.id !== 'default' ? el('button', { class: 'btn danger', onclick: async () => { if (await confirmDialog(T('Delete the assistant {name}?', { name: a.name }))) { await api('/api/assistants/' + a.id, { method: 'DELETE' }); S.sel.assistantId = ''; await loadState(); render(); } } }, I('trash', 'sm'), T('Delete')) : null));
     content.append(page('Assistants', 'System prompt, preferred model and tool set', el('div', { class: 'split' }, list, card)));
   }
   function pageAgents(content) {
@@ -1168,10 +1386,51 @@
     }
     content.append(page('Agent servers', 'Chat with hosted agents, or lend this machine to them', card));
   }
+  // ---- audit log: every tool call, paged and filtered on the server (search, decision, failures), CSV export
+  const AUDIT_DECISIONS = [['', 'All decisions'], ['allow', 'Allowed'], ['deny', 'Denied'], ['block', 'Blocked'], ['schema', 'Not run: arguments did not fit'], ['cancelled', 'Cancelled']];
+  const prettyArgs = (s) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s || ''; } };
   async function pageAudit(content) {
-    const tb = el('tbody'); const wrap = page('Audit log', 'Every tool call, decision and result', el('div', { class: 'row' }, el('button', { class: 'btn', onclick: () => { S.settingsPage = 'audit'; render(); } }, I('refresh', 'sm'), T('Refresh'))), el('div', { class: 'table-wrap' }, el('table', { class: 'table' }, el('thead', {}, el('tr', {}, el('th', {}, T('Time')), el('th', {}, T('Tool')), el('th', {}, T('Decision')), el('th', {}, T('Took')), el('th', {}, T('Arguments')), el('th', {}, T('Result')))), tb)));
-    content.append(wrap);
-    try { const rows = await api('/api/audit?limit=300'); for (const r of rows) tb.append(el('tr', {}, el('td', { class: 'muted tiny' }, new Date(r.ts * 1000).toLocaleString()), el('td', { class: 'mono' }, r.tool), el('td', {}, el('span', { class: 'chip ' + (r.is_error ? 'err' : r.decision === 'allow' || r.decision === 'human' ? 'ok' : 'warn') }, T(r.decision) + (r.is_error ? ' · ' + T('error') : ''))), el('td', {}, fmtMs(r.duration_ms)), el('td', { class: 'mono' }, (r.arguments || '').slice(0, 160)), el('td', { class: 'mono' }, (r.result_excerpt || '').slice(0, 160)))); if (!rows.length) tb.append(el('tr', {}, el('td', { colspan: 6, class: 'muted' }, T('Nothing yet.')))); } catch (e) { toast(e.message, true); }
+    const f = S.sel.audit = S.sel.audit || { q: '', decision: '', errors: false, offset: 0, limit: 50 };
+    const tb = el('tbody'); const summary = el('span', { class: 'muted tiny' }); const nav = el('span', { class: 'row', style: 'gap:6px' });
+    const qs = () => `q=${encodeURIComponent(f.q)}&decision=${encodeURIComponent(f.decision)}&errors=${f.errors ? 1 : 0}`;
+    let timer = null;
+    const search = el('input', { class: 'input', style: 'max-width:300px', placeholder: T('Search tools, arguments or results'), value: f.q, oninput: (e) => { f.q = e.target.value; clearTimeout(timer); timer = setTimeout(() => { f.offset = 0; load(); }, 300); } });
+    const dec = el('select', { class: 'select', style: 'width:auto', onchange: (e) => { f.decision = e.target.value; f.offset = 0; load(); } }, ...AUDIT_DECISIONS.map(([v, l]) => el('option', { value: v, selected: v === f.decision }, T(l))));
+    const errs = el('label', { class: 'row tiny', style: 'gap:6px;cursor:pointer;white-space:nowrap' }, el('input', { type: 'checkbox', checked: f.errors || undefined, onchange: (e) => { f.errors = e.target.checked; f.offset = 0; load(); } }), T('Failed calls only'));
+    const size = el('select', { class: 'select', style: 'width:auto', onchange: (e) => { f.limit = parseInt(e.target.value, 10); f.offset = 0; load(); } }, ...[25, 50, 100, 200].map((n) => el('option', { value: n, selected: n === f.limit }, T('{n} per page', { n }))));
+    const exportBtn = el('a', { class: 'btn', download: '', title: T('Download the matching rows as CSV') }, I('download', 'sm'), T('Export CSV'));
+    content.append(page('Audit log', 'Every tool call, decision and result',
+      el('div', { class: 'row', style: 'flex-wrap:wrap' }, search, dec, errs, el('span', { class: 'spacer' }), exportBtn, el('button', { class: 'btn', onclick: () => load() }, I('refresh', 'sm'), T('Refresh'))),
+      el('div', { class: 'table-wrap' }, el('table', { class: 'table audit' }, el('thead', {}, el('tr', {}, ...['Time', 'Tool', 'Decision', 'Took', 'Arguments', 'Result'].map((h) => el('th', {}, T(h))))), tb)),
+      el('div', { class: 'row', style: 'flex-wrap:wrap' }, summary, el('span', { class: 'spacer' }), size, nav)));
+    async function load() {
+      let r; try { r = await api(`/api/audit/page?limit=${f.limit}&offset=${f.offset}&${qs()}`); } catch (e) { toast(e.message, true); return; }
+      exportBtn.href = '/api/audit/export?' + qs() + (token ? '&token=' + encodeURIComponent(token) : '');
+      tb.innerHTML = '';
+      for (const row of r.items) {
+        const tr = el('tr', { class: 'arow', title: T('Click to see the full arguments and result') },
+          el('td', { class: 'muted tiny', style: 'white-space:nowrap' }, new Date(row.ts * 1000).toLocaleString()), el('td', { class: 'mono', style: 'white-space:nowrap' }, row.tool),
+          el('td', {}, el('span', { class: 'chip ' + (row.is_error ? 'err' : row.decision === 'allow' || row.decision === 'human' ? 'ok' : 'warn') }, T(row.decision) + (row.is_error ? ' · ' + T('error') : ''))),
+          el('td', { style: 'white-space:nowrap' }, fmtMs(row.duration_ms)), el('td', { class: 'mono' }, (row.arguments || '').slice(0, 140)), el('td', { class: 'mono' }, (row.result_excerpt || '').slice(0, 140)));
+        tr.addEventListener('click', () => {
+          const open = tr.nextElementSibling?.classList.contains('adetail');
+          tb.querySelectorAll('.adetail').forEach((x) => x.remove());
+          if (open) return;
+          const chat = row.conversation_id ? el('button', { class: 'btn sm', onclick: (e) => { e.stopPropagation(); openConv(activePane(), row.conversation_id).catch((err) => toast(err.message, true)); } }, I('chat', 'sm'), T('Open the chat')) : null;
+          tr.after(el('tr', { class: 'adetail' }, el('td', { colspan: 6 }, el('div', { class: 'adgrid' }, el('div', {}, el('div', { class: 'lbl' }, T('Arguments')), el('pre', {}, prettyArgs(row.arguments))), el('div', {}, el('div', { class: 'lbl' }, T('Result')), linkedPre(row.result_excerpt || ''))), chat ? el('div', { class: 'row', style: 'margin-top:8px' }, chat) : null)));
+        });
+        tb.append(tr);
+      }
+      if (!r.items.length) tb.append(el('tr', {}, el('td', { colspan: 6, class: 'muted' }, f.q || f.decision || f.errors ? T('No calls match these filters.') : T('Nothing yet.'))));
+      const pages = Math.max(1, Math.ceil(r.total / f.limit)); const cur = Math.floor(f.offset / f.limit) + 1;
+      summary.textContent = r.total ? T('{from}–{to} of {total}', { from: f.offset + 1, to: Math.min(f.offset + f.limit, r.total), total: r.total }) : '';
+      nav.innerHTML = '';
+      const go = (o) => { f.offset = Math.max(0, o); load(); };
+      nav.append(el('button', { class: 'btn sm', disabled: cur <= 1 || undefined, title: T('First page'), onclick: () => go(0) }, '«'), el('button', { class: 'btn sm', disabled: cur <= 1 || undefined, onclick: () => go(f.offset - f.limit) }, T('Previous')),
+        el('span', { class: 'muted tiny' }, T('Page {cur} / {pages}', { cur, pages })),
+        el('button', { class: 'btn sm', disabled: cur >= pages || undefined, onclick: () => go(f.offset + f.limit) }, T('Next')), el('button', { class: 'btn sm', disabled: cur >= pages || undefined, title: T('Last page'), onclick: () => go((pages - 1) * f.limit) }, '»'));
+    }
+    await load();
   }
   // ---- memory: facts the assistant keeps across chats (it saves them with memory_save; you can add, edit, delete)
   async function pageMemory(content) {
@@ -1213,7 +1472,9 @@
     content.append(page('General', 'This studio', el('div', { class: 'card' }, el('h3', {}, T('Server')), el('div', { class: 'grid2' }, field(T('Version'), el('div', {}, 'missile-studio ' + st.version)), field(T('Bound to'), el('div', {}, `${st.server.host}:${st.server.port} · ` + (st.server.auth_required ? T('token required') : T('this machine only, no token')))), field(T('Config file'), el('code', {}, st.config_path)), field(T('Data folder'), el('code', {}, st.home))), el('div', { class: 'muted tiny' }, ...rich(T('Change the host, port or token with {serve} or {token}. The admin console at {admin} manages tokens, logs, retention and system status.'), { serve: el('code', {}, 'ms serve --host 0.0.0.0 --port 7700 --token …'), token: el('code', {}, 'ms config set-token …'), admin: el('a', { href: '/admin', target: '_blank' }, '/admin') }))),
       st.server.auth_required ? (() => { const who = el('div', { class: 'muted tiny' }, S.health?.via === 'cookie' ? T('Signed in with an account.') : T('Signed in with an access token kept in this browser.')); api('/api/admin/auth/me').then((me) => { who.textContent = T('Signed in as {user} · {role}', { user: me.username, role: T(me.role) }) + ' · ' + (me.role === 'admin' ? T('the same session opens /admin') : T('chat only; settings belong to the admin')); }).catch(() => {}); return el('div', { class: 'card' }, el('h3', {}, T('Session')), who, el('div', {}, el('button', { class: 'btn', onclick: signOut }, I('x', 'sm'), T('Sign out')))); })() : null,
       el('div', { class: 'card' }, el('h3', {}, T('Language')), el('div', { class: 'row' }, ...['en', 'ko'].map((l) => el('button', { class: 'btn' + (i18n.lang === l ? ' primary' : ''), onclick: () => setLang(l) }, LANG_NAME[l]))), el('div', { class: 'muted tiny' }, T('Kept in this browser. The rail button at the bottom left switches it too.'))),
-      el('div', { class: 'card' }, el('h3', {}, T('Appearance')), el('div', { class: 'row' }, el('button', { class: 'btn' + (theme.get() === 'dark' ? ' primary' : ''), onclick: () => theme.set('dark') }, I('moon', 'sm'), T('Dark')), el('button', { class: 'btn' + (theme.get() === 'warm' ? ' primary' : ''), onclick: () => theme.set('warm') }, I('sparkles', 'sm'), T('Warm')), el('button', { class: 'btn' + (theme.get() === 'light' ? ' primary' : ''), onclick: () => theme.set('light') }, I('sun', 'sm'), T('Light'))), el('div', { class: 'muted tiny' }, T('Dark is the default. Warm has cream paper, terracotta accents and serif headings.'))),
+      el('div', { class: 'card' }, el('h3', {}, T('Appearance')), el('div', { class: 'row' }, el('button', { class: 'btn' + (theme.get() === 'dark' ? ' primary' : ''), onclick: () => theme.set('dark') }, I('moon', 'sm'), T('Dark')), el('button', { class: 'btn' + (theme.get() === 'warm' ? ' primary' : ''), onclick: () => theme.set('warm') }, I('sparkles', 'sm'), T('Warm')), el('button', { class: 'btn' + (theme.get() === 'light' ? ' primary' : ''), onclick: () => theme.set('light') }, I('sun', 'sm'), T('Light'))), el('div', { class: 'muted tiny' }, T('Dark is the default. Warm has cream paper, terracotta accents and serif headings.')),
+        el('div', { class: 'sect' }, T('Chat text')), el('div', { class: 'row' }, ...[['s', 'Small'], ['m', 'Default'], ['l', 'Large']].map(([v, l]) => el('button', { class: 'btn sm' + ((view.get('text') || 'm') === v ? ' primary' : ''), onclick: () => view.set('text', v === 'm' ? '' : v) }, T(l))), el('span', { class: 'spacer' }), el('span', { class: 'row tiny' }, switchEl(view.get('wide') === '1', (v) => view.set('wide', v ? '1' : '')), T('Wide chat column')))),
+      el('div', { class: 'card' }, el('h3', {}, T('Notifications')), el('div', { class: 'row' }, switchEl(notifyOn(), (v) => setNotify(v)), T('Notify me when an answer finishes while this tab is in the background')), el('div', { class: 'muted tiny' }, T('The tab title gets a ● either way. Kept in this browser.'))),
       el('div', { class: 'card' }, el('h3', {}, T('Keyboard')), el('div', {}, el('button', { class: 'btn', onclick: openShortcuts }, I('info', 'sm'), T('Show all shortcuts') + ' (Ctrl/⌘ /)'))),
       el('div', { class: 'card' }, el('h3', {}, T('Use this studio elsewhere')), el('div', { class: 'md', html: md(T('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for other MCP clients: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)')) }))));
   }

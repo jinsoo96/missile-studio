@@ -714,12 +714,12 @@ class Engine:
             save_config(self.cfg)
         return models
 
-    async def test_provider(self, pc: ProviderConfig) -> dict:
+    async def test_provider(self, pc: ProviderConfig, limit: int = 200) -> dict:
         p = build_provider(pc)
         try:
             t0 = time.time()
             models = await p.list_models()
-            return {"ok": True, "models": models[:200], "count": len(models), "ms": int((time.time() - t0) * 1000)}
+            return {"ok": True, "models": models[:limit], "count": len(models), "ms": int((time.time() - t0) * 1000)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
         finally:
@@ -981,6 +981,9 @@ class Engine:
         style = self.cfg.style(req.style_id or conv.get("style_id") or "")
         if style and style.prompt:
             system += "\n\nWriting style: " + style.prompt
+        chat_cfg = conv.get("settings") or {}  # per-chat overrides from the chat settings panel
+        if chat_cfg.get("instructions"):
+            system += "\n\nInstructions for this chat (they take priority over the defaults above):\n" + chat_cfg["instructions"]
         if summary:
             system += "\n\nEarlier part of this conversation, compacted into a summary:\n" + summary
         if self.cfg.memory.enabled:
@@ -1018,8 +1021,8 @@ class Engine:
         history_msgs = [_strip(m) for m in _repair_history(history)]
         messages: list[dict] = [{"role": "system", "content": compose_system()}] + (_promptify(history_msgs) if prompt_tools else history_msgs) + [user_msg]
         options = GenerationOptions(
-            temperature=assistant.temperature if assistant else None,
-            max_tokens=assistant.max_tokens if assistant else None,
+            temperature=chat_cfg["temperature"] if chat_cfg.get("temperature") is not None else (assistant.temperature if assistant else None),
+            max_tokens=chat_cfg.get("max_tokens") or (assistant.max_tokens if assistant else None),
             context={"conversation_id": req.conversation_id},
         )
         if pcfg and pcfg.kind == "openai" and ":11434" in (pcfg.base_url or "") and not options.max_tokens:

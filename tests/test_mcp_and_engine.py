@@ -60,6 +60,7 @@ class FakeProvider(BaseProvider):
     script: list[list[dict]] = []
     seen: list[list[dict]] = []
     tools_seen: list[list[str]] = []  # tool names offered on each request (None -> [])
+    options_seen: list = []  # generation options of each request
 
     async def list_models(self):
         return ["fake-1"]
@@ -67,6 +68,7 @@ class FakeProvider(BaseProvider):
     async def stream(self, model, messages, tools=None, options=None):
         FakeProvider.seen.append([dict(m) for m in messages])  # copy: the engine keeps appending to its list
         FakeProvider.tools_seen.append([t["name"] for t in (tools or [])])
+        FakeProvider.options_seen.append(options)
         step = FakeProvider.script.pop(0)
         for ev in step:
             yield ev

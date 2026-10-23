@@ -13,6 +13,8 @@ Settings-changing routes require the admin role.
 
 import asyncio
 import base64
+import csv
+import io
 import json
 import logging
 import mimetypes
@@ -32,8 +34,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import __version__
-from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerConfig, ModelPreset, ProviderConfig, StyleConfig, ToolPolicy, config_path, ensure_token, home_dir
+from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerConfig, ModelPreset, PromptConfig, ProviderConfig, StyleConfig, ToolPolicy, config_path, ensure_token, home_dir
 from ..device_bridge import DeviceBridge
+from ..providers.probe import candidates as probe_candidates
 from ..engine import Engine, TurnRequest
 from ..providers.base import ProviderError
 from ..wake import WakeManager
@@ -171,6 +174,26 @@ class BridgeIn(BaseModel):
     provider_id: str
     trust: bool = False
     device_name: str = ""
+
+
+def _chat_settings(raw: Any) -> dict:
+    """Per-chat overrides, cleaned: instructions (text), temperature (0..2), max_tokens (>0). Empty values are dropped."""
+    raw = raw if isinstance(raw, dict) else {}
+    out: dict[str, Any] = {}
+    text = str(raw.get("instructions") or "").strip()
+    if text:
+        out["instructions"] = text[:20000]
+    try:
+        if raw.get("temperature") not in (None, ""):
+            out["temperature"] = min(2.0, max(0.0, float(raw["temperature"])))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if raw.get("max_tokens") not in (None, "") and int(raw["max_tokens"]) > 0:
+            out["max_tokens"] = int(raw["max_tokens"])
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def create_app(engine: Engine, token: str = "") -> FastAPI:
@@ -364,6 +387,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "model_presets": [p.model_dump() for p in cfg.effective_presets()],
             "presets_configured": bool(cfg.presets),
             "styles": [st.model_dump() for st in cfg.styles],
+            "prompts": [pr.model_dump() for pr in cfg.prompts],
         }
 
     @app.put("/api/presets", dependencies=[admin_dep])
@@ -385,6 +409,22 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     @app.delete("/api/styles/{sid}", dependencies=[admin_dep])
     async def delete_style(sid: str):
         engine.cfg.styles = [x for x in engine.cfg.styles if x.id != sid]
+        engine.save()
+        return {"ok": True}
+
+    # ------------------------------------------------------------ prompt library
+    @app.post("/api/prompts", dependencies=[admin_dep])
+    async def upsert_prompt(body: PromptConfig):
+        if not re.fullmatch(r"[\w.-]{1,40}", body.id):
+            raise HTTPException(400, "id: letters, digits, . _ - (up to 40)")
+        cfg = engine.cfg
+        cfg.prompts = [body if x.id == body.id else x for x in cfg.prompts] if any(x.id == body.id for x in cfg.prompts) else [*cfg.prompts, body]
+        engine.save()
+        return [pr.model_dump() for pr in cfg.prompts]
+
+    @app.delete("/api/prompts/{pid}", dependencies=[admin_dep])
+    async def delete_prompt(pid: str):
+        engine.cfg.prompts = [x for x in engine.cfg.prompts if x.id != pid]
         engine.save()
         return {"ok": True}
 
@@ -459,6 +499,24 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         body.pop("has_password", None)
         pc = ProviderConfig.model_validate(body)
         return await engine.test_provider(pc)
+
+    @app.post("/api/providers/probe", dependencies=[admin_dep])
+    async def probe_provider(body: dict):
+        """A pasted endpoint (bare host, base URL or full request URL) and an optional key: try the likely API kind and
+        base URLs, and return the first that lists models. kind "" or "auto" lets the URL decide."""
+        url = str(body.get("url") or "")
+        kind = str(body.get("kind") or "")
+        extra = {k: body[k] for k in ("headers", "allow_insecure_tls") if k in body}
+        tried = []
+        for k, base in probe_candidates(url, "" if kind == "auto" else kind):
+            pc = ProviderConfig(id="probe", kind=k, base_url=base, api_key=str(body.get("api_key") or ""), **extra)
+            r = await engine.test_provider(pc, limit=5000)  # the whole list: the user picks which to keep
+            tried.append({"kind": k, "base_url": base, "ok": r.get("ok"), "error": (r.get("error") or "")[:300]})
+            if r.get("ok"):
+                return {**r, "kind": k, "base_url": base, "tried": tried}
+        if not tried:
+            return {"ok": False, "error": "enter the endpoint URL", "tried": []}
+        return {"ok": False, "error": tried[-1]["error"], "kind": tried[0]["kind"], "base_url": tried[0]["base_url"], "tried": tried}
 
     @app.post("/api/default", dependencies=[admin_dep])
     async def set_default(body: DefaultIn):
@@ -736,8 +794,13 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     @app.patch("/api/conversations/{cid}", dependencies=[user_dep])
     async def patch_conversation(cid: str, body: dict):
-        allowed = {k: v for k, v in body.items() if k in ("title", "assistant_id", "provider_id", "model", "style_id")}
-        store.update_conversation(cid, **allowed)
+        allowed = {k: v for k, v in body.items() if k in ("title", "assistant_id", "provider_id", "model", "style_id", "pinned", "settings")}
+        if "pinned" in allowed:
+            allowed["pinned"] = time.time() if allowed["pinned"] else 0
+        if "settings" in allowed:
+            allowed["settings"] = json.dumps(_chat_settings(allowed["settings"]), ensure_ascii=False)
+        # renaming or pinning is not activity: the chat keeps its place in the list
+        store.update_conversation(cid, touch=not set(allowed) <= {"title", "pinned", "settings"}, **allowed)
         return store.get_conversation(cid)
 
     @app.post("/api/conversations/{cid}/head", dependencies=[user_dep])
@@ -856,6 +919,25 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     @app.get("/api/audit", dependencies=[user_dep])
     async def audit(limit: int = 200, conversation_id: str = ""):
         return store.list_audit(limit=limit, conversation_id=conversation_id)
+
+    @app.get("/api/audit/page", dependencies=[user_dep])
+    async def audit_page(limit: int = 50, offset: int = 0, q: str = "", decision: str = "", errors: int = 0, conversation_id: str = ""):
+        limit = min(max(limit, 1), 500)
+        items, total = store.query_audit(limit=limit, offset=offset, conversation_id=conversation_id, q=q.strip(), decision=decision, errors=bool(errors))
+        return {"items": items, "total": total, "limit": limit, "offset": max(0, offset)}
+
+    @app.get("/api/audit/export", dependencies=[user_dep])
+    async def audit_export(q: str = "", decision: str = "", errors: int = 0, conversation_id: str = ""):
+        """The rows matching the audit filters as CSV (newest first, at most 10,000)."""
+        items, _ = store.query_audit(limit=10000, offset=0, conversation_id=conversation_id, q=q.strip(), decision=decision, errors=bool(errors))
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["time", "conversation_id", "tool", "decision", "is_error", "duration_ms", "arguments", "result_excerpt"])
+        for r in items:
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])), r["conversation_id"], r["tool"], r["decision"], r["is_error"], r["duration_ms"], r["arguments"], r["result_excerpt"]])
+        name = time.strftime("audit-%Y%m%d-%H%M%S.csv")
+        # a BOM so spreadsheet apps read the UTF-8 text correctly
+        return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     # ------------------------------------------------------------ uploads
     @app.post("/api/upload", dependencies=[user_dep])

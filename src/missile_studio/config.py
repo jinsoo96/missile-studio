@@ -208,6 +208,14 @@ class StyleConfig(BaseModel):
     prompt: str = ""
 
 
+class PromptConfig(BaseModel):
+    """A saved prompt the composer inserts with /name; {{variables}} are asked for when it is inserted."""
+
+    id: str
+    name: str
+    text: str = ""
+
+
 DEFAULT_STYLES: list[dict] = [
     {"id": "normal", "name": "Normal", "prompt": ""},
     {"id": "concise", "name": "Concise", "prompt": "Answer as briefly as possible. No preamble, no recap. Prefer short sentences and lists."},
@@ -243,6 +251,7 @@ class Config(BaseModel):
     tool_catalog: ToolCatalogConfig = Field(default_factory=ToolCatalogConfig)
     presets: list[ModelPreset] = Field(default_factory=list)
     styles: list[StyleConfig] = Field(default_factory=list)
+    prompts: list[PromptConfig] = Field(default_factory=list)
 
     # ---- helpers
     def provider(self, pid: str) -> Optional[ProviderConfig]:
