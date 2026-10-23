@@ -57,6 +57,7 @@
     'No chats match.': '일치하는 채팅이 없습니다.', 'No chats yet. Start one.': '아직 채팅이 없습니다. 새로 시작해 보세요.',
     '{n} panes · a chat you pick opens in the highlighted pane': '창 {n}개 · 고른 채팅은 강조된 창에서 열립니다',
     'Ctrl/⌘ K searches chats and commands · ⫿ splits the view': 'Ctrl/⌘ K로 채팅과 명령 검색 · ⫿로 화면 나누기',
+    'Type a message': '메시지 입력',
     'Manage': '관리', 'No system prompt': '시스템 프롬프트 없음', 'Add assistant': '어시스턴트 추가',
     'Choose a model: quick presets first, then every model': '모델 선택: 빠른 프리셋이 먼저, 그다음 모든 모델', 'No provider': '프로바이더 없음',
     'Pick a model': '모델 선택', 'Quick': '빠른 선택', 'No models yet. Find them in Settings.': '아직 모델이 없습니다. 설정에서 찾아 주세요.',

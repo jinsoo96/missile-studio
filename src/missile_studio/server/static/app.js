@@ -211,6 +211,7 @@
   const ui = { paneW: PANE_W.def, paneHidden: false, mobilePane: false };
   try { const w = parseInt(localStorage.getItem('missile_pane_w'), 10); if (w) ui.paneW = Math.min(PANE_W.max, Math.max(PANE_W.min, w)); ui.paneHidden = localStorage.getItem('missile_pane_hidden') === '1'; } catch {}
   const narrow = () => matchMedia('(max-width: 900px)').matches;  // the list opens over the chat there
+  const phone = () => matchMedia('(max-width: 640px)').matches;
   function setPaneHidden(v) { ui.paneHidden = v; try { localStorage.setItem('missile_pane_hidden', v ? '1' : '0'); } catch {} }
   function togglePane() { if (narrow()) ui.mobilePane = !ui.mobilePane; else setPaneHidden(!ui.paneHidden); render(); }
   function setPaneW(w, save) { ui.paneW = Math.min(PANE_W.max, Math.max(PANE_W.min, Math.round(w))); $('.shell')?.style.setProperty('--pane', ui.paneW + 'px'); if (save) try { localStorage.setItem('missile_pane_w', String(ui.paneW)); } catch {} }
@@ -347,7 +348,7 @@
       if (!items.length) list.append(el('div', { class: 'muted tiny', style: 'padding:14px 10px' }, S.convs.length ? T('No chats match.') : T('No chats yet. Start one.')));
     }
     renderList();
-    pane.append(el('div', { class: 'muted tiny', style: 'padding:8px 14px;border-top:1px solid var(--border)' }, S.panes.length > 1 ? T('{n} panes · a chat you pick opens in the highlighted pane', { n: S.panes.length }) : T('Ctrl/⌘ K searches chats and commands · ⫿ splits the view')));
+    pane.append(el('div', { class: 'muted tiny pane-hint', style: 'padding:8px 14px;border-top:1px solid var(--border)' }, S.panes.length > 1 ? T('{n} panes · a chat you pick opens in the highlighted pane', { n: S.panes.length }) : T('Ctrl/⌘ K searches chats and commands · ⫿ splits the view')));
     return pane;
   }
   function renderAssistantPane() {
@@ -430,17 +431,17 @@
   function renderPane(pane, idx) {
     const t = targetOf(pane);
     const col = el('div', { class: 'pane-col' + (idx === S.active && S.panes.length > 1 ? ' active-pane' : ''), onmousedown: () => focusPane(idx) });
-    const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px', title: T('Assistant') + ': ' + (t.assistant?.name || T('Assistant')) }, el('span', { class: 'asst' }, customEmoji(t.assistant), S.panes.length > 1 ? (customEmoji(t.assistant) ? null : I('sparkles', 'sm')) : (t.assistant?.name || T('Assistant'))), I('chevron', 'xs'));
+    const asstBtn = el('button', { class: 'btn quiet', style: 'padding:0 8px', title: T('Assistant') + ': ' + (t.assistant?.name || T('Assistant')) }, el('span', { class: 'asst' }, customEmoji(t.assistant), S.panes.length > 1 ? (customEmoji(t.assistant) ? null : I('sparkles', 'sm')) : [customEmoji(t.assistant) ? null : el('span', { class: 'asst-ico' }, I('sparkles', 'sm')), el('span', { class: 'asst-name truncate' }, t.assistant?.name || T('Assistant'))]), I('chevron', 'xs'));
     asstBtn.addEventListener('click', () => menu(asstBtn, S.st.assistants.map((a) => ({ label: a.name, sub: a.id, id: a.id, selected: a.id === t.aid })), { onPick: (it) => setAssistant(pane, it.id) }));
     const toolsOn = pane.sel.tools !== false;
     const toolsBtn = t.provider?.kind === 'agentserver' ? el('span', { class: 'chip info', title: T('Tools run on the agent server') }, I('cloud', 'xs')) : el('button', { class: 'ico' + (toolsOn ? ' on' : ''), title: toolsOn ? T('{n} local tools on · click to turn off', { n: S.st.tools.length }) : T('Tools off · click to turn on'), onclick: () => { pane.sel.tools = !toolsOn; render(); } }, I('wrench', 'sm'));
     const waking = (S.st.wake || []).filter(wakeActive);
     const wakeChip = waking.length ? el('button', { class: 'chip info wake-chip', title: waking.map((j) => `${j.server}: ${j.stage}`).join('\n'), onclick: () => { S.view = 'settings'; S.settingsPage = 'mcp'; S.sel.mcpName = waking[0].server; render(); } }, I('refresh', 'xs'), T('Waking {server} · {status}', { server: waking[0].server, status: wakeLabel(waking[0]) })) : null;
-    const showPaneBtn = idx === 0 && (ui.paneHidden || narrow()) ? el('button', { class: 'ico', title: T('Show sidebar') + ' (Ctrl/⌘ B)', 'aria-label': T('Show sidebar'), onclick: togglePane }, I('sidebar', 'sm')) : null;
+    const showPaneBtn = idx === 0 && (ui.paneHidden || narrow()) ? el('button', { class: 'ico pane-btn', title: T('Show sidebar') + ' (Ctrl/⌘ B)', 'aria-label': T('Show sidebar'), onclick: togglePane }, I('sidebar', 'sm')) : null;
     const bar = el('div', { class: 'topbar' }, showPaneBtn, asstBtn, modelPicker(pane), thinkingButton(pane), chatSettingsButton(pane), toolsBtn, wakeChip, el('span', { class: 'spacer' }));
     if (idx === S.panes.length - 1 && S.st.version) bar.append(el('button', { class: 'ver', title: T('missile studio {v} · what this is', { v: S.st.version }), onclick: () => openIntro() }, 'v' + S.st.version));
     if (S.panes.length > 1) bar.append(el('button', { class: 'ico' + (S.linkInputs ? ' on' : ''), title: S.linkInputs ? T('Inputs linked: one message goes to every pane') : T('Link inputs: send one message to every pane to compare models'), onclick: () => { S.linkInputs = !S.linkInputs; render(); } }, I('link', 'sm')));
-    if (S.panes.length < MAX_PANES) bar.append(el('button', { class: 'ico', title: T('Split: open another chat beside this one') + ' (Ctrl/⌘ \\)', onclick: () => splitPane(idx) }, I('columns', 'sm')));
+    if (S.panes.length < MAX_PANES) bar.append(el('button', { class: 'ico split-btn', title: T('Split: open another chat beside this one') + ' (Ctrl/⌘ \\)', onclick: () => splitPane(idx) }, I('columns', 'sm')));
     if (S.panes.length > 1) bar.append(el('button', { class: 'ico', title: T('Close this pane'), onclick: () => closePane(idx) }, I('x', 'sm')));
     if (pane.conv) bar.append(el('button', { class: 'ico', title: T('Delete chat'), onclick: () => deleteConv(pane.convId) }, I('trash', 'sm')));
     col.append(bar);
@@ -572,7 +573,7 @@
     const wrap = el('div', { class: 'composer-wrap' });
     const box = el('div', { class: 'composer' });
     const pills = el('div', { class: 'pills' }); box.append(pills);
-    const ta = el('textarea', { class: 'composerInput', rows: 1, placeholder: t.provider ? (S.linkInputs && S.panes.length > 1 ? T('Message every pane. Enter to send, "/" for commands.') : T('Type a message. Enter to send, Shift+Enter for a new line, "/" for commands.')) : T('Add a provider in Settings first.') });
+    const ta = el('textarea', { class: 'composerInput', rows: 1, placeholder: t.provider ? (S.linkInputs && S.panes.length > 1 ? T('Message every pane. Enter to send, "/" for commands.') : phone() ? T('Type a message') : T('Type a message. Enter to send, Shift+Enter for a new line, "/" for commands.')) : T('Add a provider in Settings first.') });
     ta.value = pane.draft || '';
     let slash = null;
     const closeSlash = () => { if (slash) { slash.el.remove(); slash = null; } };
@@ -1254,7 +1255,7 @@
     card.append(el('h3', {}, T('Defaults for new chats')), el('div', { class: 'grid2' }, field(T('Provider'), sp), field(T('Model'), sm)), field(T('Assistant'), sa), el('div', {}, el('button', { class: 'btn primary', onclick: async () => { await api('/api/default', { method: 'POST', body: { provider: sp.value, model: sm.value, assistant: sa.value } }); toast(T('Saved')); await loadState(); render(); } }, T('Save'))));
     const pc = el('div', { class: 'card' }, el('h3', {}, T('Quick presets'), el('span', { class: 'chip' }, S.st.presets_configured ? T('custom') : T('derived from your providers'))), el('div', { class: 'muted tiny' }, T("Shown at the top of the model picker. Thinking \"default\" leaves the provider as it is; on, max and off map to each provider's own setting (budgets, reasoning effort, enable_thinking).")));
     const rows = (S.st.model_presets || []).map((p) => ({ ...p }));
-    const tbl = el('div', { style: 'display:grid;gap:8px' });
+    const tbl = el('div', { style: 'display:grid;gap:8px;overflow-x:auto' });  // a row is wider than a phone: it scrolls inside the card
     const renderRows = () => { tbl.innerHTML = ''; rows.forEach((r, i) => { const prov = el('select', { class: 'select', onchange: (e) => { r.provider = e.target.value; } }, ...S.st.providers.map((p) => el('option', { value: p.id, selected: p.id === r.provider }, p.label || p.id))); tbl.append(el('div', { class: 'row', style: 'flex-wrap:nowrap' }, el('input', { class: 'input', style: 'width:80px', value: r.id, oninput: (e) => { r.id = e.target.value.trim(); } }), el('input', { class: 'input', style: 'width:110px', value: r.label, oninput: (e) => { r.label = e.target.value; } }), prov, el('input', { class: 'input', value: r.model, placeholder: T('Model id'), oninput: (e) => { r.model = e.target.value.trim(); } }), el('select', { class: 'select', style: 'width:150px', onchange: (e) => { r.thinking = e.target.value; } }, ...['', 'off', 'on', 'max'].map((v) => el('option', { value: v, selected: v === (r.thinking || '') }, T(THINK_LABEL[v])))), el('button', { class: 'btn quiet icon sm', onclick: () => { rows.splice(i, 1); renderRows(); } }, I('x', 'sm')))); }); };
     renderRows();
     pc.append(tbl, el('div', { class: 'row' }, el('button', { class: 'btn sm', onclick: () => { rows.push({ id: `p${rows.length + 1}`, label: T('Preset'), provider: S.st.providers[0]?.id || '', model: '', thinking: '' }); renderRows(); } }, I('plus', 'sm'), T('Add preset')), el('span', { class: 'spacer' }), el('button', { class: 'btn', onclick: async () => { await api('/api/presets', { method: 'PUT', body: [] }); toast(T('Back to presets derived from your providers')); await loadState(); render(); } }, T('Reset')), el('button', { class: 'btn primary', onclick: async () => { try { await api('/api/presets', { method: 'PUT', body: rows }); toast(T('Presets saved')); await loadState(); render(); } catch (e) { toast(e.message, true); } } }, T('Save presets'))));

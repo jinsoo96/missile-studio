@@ -86,9 +86,11 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .kbd { font: 11px var(--mono); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; color: var(--fg-muted); background: var(--card); }
 
 /* ---------- shell ---------- */
-.shell { display: grid; grid-template-columns: var(--rail) var(--pane) 1fr; height: 100vh; }
+/* one row the height of the window: a long chat list scrolls inside its pane instead of stretching the row,
+   which pushed the rail's bottom buttons off screen. dvh follows the phone's address bar. */
+.shell { display: grid; grid-template-columns: var(--rail) var(--pane) 1fr; grid-template-rows: minmax(0, 1fr); height: 100vh; height: 100dvh; }
 .shell.no-pane { grid-template-columns: var(--rail) 1fr; }
-.rail { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding: 12px 0 10px; gap: 4px; }
+.rail { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding: 12px 0 10px; gap: 4px; min-height: 0; }
 .rail .logo { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; font-size: 20px; margin-bottom: 10px; background: transparent; }
 .rail button { width: 42px; height: 42px; border-radius: 12px; border: 0; background: transparent; color: var(--fg-muted); cursor: pointer; display: grid; place-items: center; position: relative; }
 .rail button:hover { background: var(--bg-subtle); color: var(--fg); }
@@ -96,7 +98,7 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .rail button .tip { position: absolute; left: 50px; top: 50%; transform: translateY(-50%); background: var(--fg); color: var(--bg); font-size: 12px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 20; }
 .rail button:hover .tip { opacity: 1; }
 .rail .bottom { margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
-.pane { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
+.pane { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .pane-head { padding: 12px 12px 8px; display: flex; gap: 8px; align-items: center; }
 .pane-head h2 { font-size: 15px; margin: 0; font-weight: 600; }
 .pane-search { margin: 0 12px 8px; position: relative; }
@@ -113,7 +115,7 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .pane-item .sub { font-size: 12px; color: var(--fg-muted); }
 .pane-item .x { opacity: 0; border: 0; background: transparent; color: var(--fg-3); cursor: pointer; padding: 4px; border-radius: 6px; }
 .pane-item:hover .x { opacity: 1; } .pane-item .x:hover { color: var(--destructive); background: var(--destructive-soft); }
-.main { min-width: 0; display: flex; flex-direction: column; height: 100vh; background: var(--bg); }
+.main { min-width: 0; min-height: 0; display: flex; flex-direction: column; height: 100%; background: var(--bg); }
 .topbar { height: 54px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--card); }
 .topbar .asst { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
 .topbar .asst .em { width: 26px; height: 26px; border-radius: 50%; background: var(--bg-subtle); display: grid; place-items: center; font-size: 14px; }
@@ -207,14 +209,14 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .hintline { max-width: 860px; margin: 6px auto 0; font-size: 11.5px; color: var(--fg-3); text-align: center; }
 
 /* ---------- settings (3 columns) ---------- */
-.settings { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+.settings { display: grid; grid-template-columns: 220px 1fr; grid-template-rows: minmax(0, 1fr); height: 100vh; height: 100dvh; }
 .settings .snav { background: var(--sidebar); border-right: 1px solid var(--border); padding: 14px 10px; overflow: auto; }
 .settings .snav h2 { font-size: 15px; margin: 4px 10px 12px; }
 .settings .snav .grp { font-size: 11px; font-weight: 600; color: var(--fg-3); text-transform: uppercase; letter-spacing: .04em; padding: 12px 10px 4px; }
 .settings .snav button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 10px; border: 0; background: transparent; border-radius: var(--r-md); color: var(--fg); cursor: pointer; text-align: left; font-weight: 500; }
 .settings .snav button:hover { background: var(--bg-subtle); } .settings .snav button.active { background: var(--card); box-shadow: inset 0 0 0 1px var(--border); }
 .settings .scontent { min-width: 0; overflow: auto; }
-.page { max-width: 1100px; margin: 0 auto; padding: 28px 32px 48px; display: grid; gap: 18px; }
+.page { max-width: 1100px; margin: 0 auto; padding: 28px 32px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
 .page h1 { font-size: 20px; margin: 0; display: flex; align-items: center; gap: 12px; }
 .page h1 small { font-size: 13px; font-weight: 400; color: var(--fg-muted); }
 .page .desc { color: var(--fg-muted); margin: -8px 0 0; }
@@ -227,7 +229,7 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .listbox .lrow .em { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: #fff; flex: none; }
 .listbox .lrow .ttl { font-weight: 500; } .listbox .lrow .sub { font-size: 12px; color: var(--fg-muted); }
 .listbox .lfoot { padding: 10px; border-top: 1px solid var(--border); }
-.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 18px 20px; display: grid; gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 18px 20px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .card h3 { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 10px; }
 .card .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .card .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -258,11 +260,12 @@ svg.i.sm { width: 15px; height: 15px; } svg.i.xs { width: 13px; height: 13px; }
 .login { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); z-index: 90; }
 .login form { width: 360px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 28px; display: grid; gap: 12px; box-shadow: var(--shadow-pop); }
 .login h1 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+.login .row { display: flex; align-items: center; gap: 8px; }
 
 @media (max-width: 900px) {
   .shell { grid-template-columns: var(--rail) 1fr; } .pane { display: none; } .shell.show-pane .pane { display: flex; position: fixed; left: var(--rail); top: 0; bottom: 0; width: 280px; z-index: 30; box-shadow: var(--shadow-pop); }
-  .settings { grid-template-columns: 1fr; } .settings .snav { display: flex; overflow-x: auto; padding: 8px; gap: 4px; } .settings .snav h2, .settings .snav .grp { display: none; } .settings .snav button { width: auto; white-space: nowrap; }
-  .split { grid-template-columns: 1fr; } .card .grid2 { grid-template-columns: 1fr; }
+  .settings { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .settings .snav { display: flex; overflow-x: auto; padding: 8px; gap: 4px; } .settings .snav h2, .settings .snav .grp { display: none; } .settings .snav button { width: auto; white-space: nowrap; }
+  .split { grid-template-columns: minmax(0, 1fr); } .card .grid2 { grid-template-columns: minmax(0, 1fr); }
   .chat-inner, .composer-wrap { padding-left: 12px; padding-right: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -538,18 +541,46 @@ mark { background: var(--primary-soft); color: var(--fg); border-radius: 3px; pa
 @keyframes introFade { to { opacity: 0; } }
 @keyframes introOrbit { 0% { opacity: 0; transform: translate(-10px, 46px); } 8% { opacity: 1; } 25% { transform: translate(190px, 12px); } 50% { transform: translate(390px, 0); } 75% { transform: translate(590px, 12px); } 92% { opacity: 1; } 100% { opacity: 0; transform: translate(790px, 46px); } }
 @keyframes introSmoke { 0% { opacity: 0; transform: translateX(0) scale(.4); } 25% { opacity: .9; } 100% { opacity: 0; transform: translateX(var(--sx)) translateY(-14px) scale(2.4); } }
+/* the assistant button shows a stand-in icon only on phones, where its name is hidden */
+.topbar .asst-ico { display: none; }
 /* phones: the top bar and the composer bar fit the width (the version is in the intro, model labels shrink) */
 @media (max-width: 640px) {
   .topbar .ver, .topbar .picker .pv { display: none; }
   .topbar .picker { min-width: 0; flex: 0 1 auto; }
   .topbar > .btn.quiet { flex: 0 1 auto; min-width: 0; overflow: hidden; }
   .composer .bar .modelbtn { flex: 0 1 auto; min-width: 0; }
+  /* the model name keeps the room: the split button, the list button (the rail opens the list), the
+     assistant's name (an icon stays) and the composer's model label (the top bar has it) give way */
+  :root { --rail: 52px; }
+  .rail button { width: 40px; }
+  .topbar { padding: 0 8px; gap: 2px; } .topbar .ico { width: 28px; }
+  .topbar .picker { flex: 1 1 auto; max-width: none; padding: 0 8px; gap: 5px; }
+  .topbar > .btn.quiet { max-width: 30%; }
+  .topbar .split-btn, .topbar .pane-btn, .topbar .asst-name, .composer .bar .modelbtn { display: none; }
+  .topbar .asst-ico { display: inline-flex; }
+  .page { padding: 18px 12px 40px; }
+  .bars .b { grid-template-columns: 96px minmax(0, 1fr) 40px; gap: 8px; }
+  .pane-col .composer-wrap { padding: 6px 8px 10px; }
+  .pane-col .chat-inner { padding: 16px 12px 12px; }
+  /* 16px stops iOS from zooming in on focus; the composer grows instead of showing a scrollbar */
+  .composer textarea { font-size: 16px; scrollbar-width: none; }
+  input.input, select.select, textarea.textarea { font-size: 16px; }
+  .settings .snav .sfind { flex: none; width: 150px; font-size: 16px; }
 }
+/* touch screens: no hover tooltips stuck after a tap, no keyboard hints */
+@media (hover: none) { .rail button .tip { display: none; } .pane-hint { display: none; } }
 
 /* UI language switch in the rail: the current language as a small badge */
 .rail .lang-badge { font: 700 11px var(--mono); letter-spacing: .02em; line-height: 1; }
 .rail button.lang { height: 48px; gap: 1px; align-content: center; }
 .rail button.lang .lang-badge { font: 700 9.5px var(--font); letter-spacing: 0; }
+
+/* short windows (zoomed in, a phone held sideways): the rail packs tighter, and scrolls when even that does not fit */
+@media (max-height: 560px) {
+  .rail { padding: 8px 0 6px; gap: 2px; } .rail .logo { margin-bottom: 4px; } .rail .bottom { gap: 2px; }
+  .rail button { height: 36px; } .rail button.lang { height: 40px; }
+}
+@media (max-height: 380px) { .rail { overflow-y: auto; scrollbar-width: none; } }
 
 /* add provider: the custom endpoint card above the presets */
 .btn.custom-ep { height: auto; width: 100%; padding: 12px 14px; justify-content: flex-start; text-align: left; gap: 12px; border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: var(--primary-soft); }
