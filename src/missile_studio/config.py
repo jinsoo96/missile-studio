@@ -291,6 +291,28 @@ class Config(BaseModel):
             ModelPreset(id="best", label="Best", provider=best.id, model=bm, thinking="max"),
         ]
 
+    def selection_issues(self) -> list[str]:
+        """Default and preset picks whose provider is missing/disabled or does not list the model.
+
+        Only reported, never auto-fixed: switching a pick to whichever provider lists the model could
+        silently move work onto a paid provider. A preset that pointed a local vLLM provider at a Claude
+        model name failed only when clicked."""
+        out: list[str] = []
+        picks = [("default", self.default.provider, self.default.model)] if self.default.provider else []
+        picks += [(f"preset '{p.id}'", p.provider, p.model) for p in self.presets]
+        for name, pid, model in picks:
+            pv = self.provider(pid)
+            if pv is None:
+                out.append(f"{name}: provider '{pid}' does not exist")
+                continue
+            if not pv.enabled:
+                out.append(f"{name}: provider '{pid}' is disabled")
+            if model and pv.models and model not in pv.models:
+                elsewhere = [p.id for p in self.providers if p.id != pid and model in p.models]
+                out.append(f"{name}: provider '{pid}' does not list model '{model}'"
+                           + (f" (listed by {', '.join(elsewhere)})" if elsewhere else f" (it lists {', '.join(pv.models[:5])})"))
+        return out
+
     def ensure_defaults(self) -> None:
         if not self.styles:
             self.styles = [StyleConfig(**d) for d in DEFAULT_STYLES]

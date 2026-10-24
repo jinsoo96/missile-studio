@@ -386,6 +386,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "maintenance": bool(store.get_setting("maintenance_mode", False)),
             "model_presets": [p.model_dump() for p in cfg.effective_presets()],
             "presets_configured": bool(cfg.presets),
+            "selection_issues": cfg.selection_issues(),
             "styles": [st.model_dump() for st in cfg.styles],
             "prompts": [pr.model_dump() for pr in cfg.prompts],
         }

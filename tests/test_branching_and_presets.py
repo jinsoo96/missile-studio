@@ -75,6 +75,24 @@ def test_effective_presets_derived_and_configured():
     assert {s.id for s in cfg.styles} >= {"normal", "concise", "formal"}
 
 
+def test_selection_issues_flag_a_model_its_provider_does_not_list():
+    cfg = Config()
+    cfg.providers.append(ProviderConfig(id="q", kind="openai", models=["qwen"], default_model="qwen"))
+    cfg.providers.append(ProviderConfig(id="c", kind="anthropic", models=["claude-x"], default_model="claude-x"))
+    cfg.providers.append(ProviderConfig(id="open", kind="openai"))  # lists nothing: any model name is fine
+    cfg.ensure_defaults()
+    assert cfg.selection_issues() == []
+    cfg.presets = [ModelPreset(id="best", label="Best", provider="q", model="claude-x"),
+                   ModelPreset(id="gone", label="Gone", provider="nope", model="qwen"),
+                   ModelPreset(id="any", label="Any", provider="open", model="whatever")]
+    issues = cfg.selection_issues()
+    assert any("preset 'best'" in i and "listed by c" in i for i in issues)
+    assert any("preset 'gone'" in i and "does not exist" in i for i in issues)
+    assert not any("preset 'any'" in i for i in issues)
+    # reported only: the pick is left as it was (no silent move to another, possibly paid, provider)
+    assert cfg.presets[0].provider == "q"
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MISSILE_HOME", str(tmp_path))

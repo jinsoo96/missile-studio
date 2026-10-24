@@ -468,6 +468,9 @@ def cmd_doctor(args) -> int:
             _p("  (none)")
         _p(f"\nlocal tools: {len(engine.local.infos())}  workspace: {engine.local.workspace}")
         _p(f"default: {cfg.default.provider or '-'} / {cfg.default.model or '-'}  assistant: {cfg.default.assistant}")
+        for issue in cfg.selection_issues():
+            rc = 1
+            _p(f"  FAIL {issue}")
         await engine.stop()
         return rc
 
