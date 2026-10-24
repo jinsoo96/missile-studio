@@ -1377,9 +1377,13 @@ class Engine:
                         key = c["name"] + "::" + json.dumps(args, ensure_ascii=False, sort_keys=True)
                         seen_calls[key] = seen_calls.get(key, 0) + 1
                         if seen_calls[key] >= 3:  # the same call over and over: usually polling a job that is not done yet
+                            # name a waiting tool only if one exists: "call job_wait" sent a model looking for a tool its server does not have
+                            waiter = next((t.full_name for t in (tools or []) if t.name in ("job_wait", "wait_job") or t.name.endswith("_wait")), None)
+                            how = (f"call {waiter} once (it blocks until the job finishes) instead of polling" if waiter else
+                                   "do not poll it again and again: if the status tool takes a wait argument, use it")
                             model_msg["content"] = (model_msg.get("content") or "") + (
                                 f"\n[You have called {c['name']} with these same arguments {seen_calls[key]} times. Stop repeating it. "
-                                "If you are waiting for a background job, call job_wait once (it blocks until the job finishes) instead of polling job_status; "
+                                f"If you are waiting for a background job, {how}; "
                                 "if it is still running, tell the user it is still running and how to check on it, then end your turn.]")
                         messages.append(_promptify([model_msg])[0] if prompt_tools else model_msg)
                         # image tool results go to the model as a follow-up user message (only the latest image survives trimming)

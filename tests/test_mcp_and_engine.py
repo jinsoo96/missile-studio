@@ -241,7 +241,8 @@ async def test_poll_loop_nudged_and_forced_answer_at_max_iterations(engine: Engi
     assert len(results) == 4
     # the nudge reaches the model (in what the 4th request carried), while the stored thread stays clean
     sent4 = [m["content"] for m in FakeProvider.seen[3] if m.get("role") == "tool"]
-    assert any("same arguments 3 times" in c and "job_wait" in c for c in sent4)
+    # the echo server has no waiting tool: the nudge must not name one (a model went looking for "job_wait" and failed)
+    assert any("same arguments 3 times" in c and "wait argument" in c and "job_wait" not in c for c in sent4)
     tool_msgs = [m for m in engine.store.get_messages(conv["id"]) if m["role"] == "tool"]
     assert all("same arguments" not in m["content"] for m in tool_msgs)
     # the turn ends with a real assistant answer, flagged as the forced one
