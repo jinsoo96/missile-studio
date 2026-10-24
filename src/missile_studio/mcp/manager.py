@@ -181,9 +181,23 @@ class McpManager:
         self._ensure_task(st)
 
     async def wait_ready(self, timeout: float = 20.0) -> None:
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout
         waits = [asyncio.wait_for(st.ready.wait(), timeout) for st in self.servers.values() if st.cfg.enabled]
         if waits:
             await asyncio.gather(*waits, return_exceptions=True)
+        # A server that failed its first try may just be restarting: retry it now (not after the backoff) for a short
+        # while. A one-shot ask that went ahead without it answered with the wrong tools (searched the disk by shell).
+        # Capped at 15 s so a server that is simply misconfigured does not hold every request for the whole timeout.
+        end = min(end, loop.time() + 15.0)
+        while loop.time() < end:
+            down = [st for st in self.servers.values() if st.cfg.enabled and st.status in ("failed", "connecting")]
+            if not down:
+                return
+            for st in down:
+                if st.status == "failed":
+                    st.reconnect_now.set()
+            await asyncio.sleep(min(1.0, max(0.0, end - loop.time())))
 
     # ------------------------------------------------------------ connection task
     async def _run(self, st: ServerState) -> None:

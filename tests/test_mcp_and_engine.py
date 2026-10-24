@@ -251,3 +251,21 @@ async def test_poll_loop_nudged_and_forced_answer_at_max_iterations(engine: Engi
     assert events[-1]["type"] == "done" and events[-1]["finish_reason"] == "max_iterations"
     assert "".join(e["text"] for e in events if e["type"] == "text_delta") == "The job is still running; ask again in a moment."
     await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_wait_ready_retries_a_server_that_was_restarting(tmp_path, monkeypatch):
+    """A server down for a moment (being restarted) when a one-shot ask starts is retried right away, not after the backoff."""
+    monkeypatch.setenv("MISSILE_HOME", str(tmp_path))
+    flag = tmp_path / "up_once"
+    # first start: leave a mark and exit (the server "is restarting"); next start: the real echo server
+    code = (f"import pathlib, runpy, sys; f = pathlib.Path(r'{flag}')\n"
+            f"if not f.exists(): f.write_text('x'); sys.exit(3)\n"
+            f"sys.argv = [r'{FIXTURE}']; runpy.run_path(r'{FIXTURE}', run_name='__main__')")
+    mgr = McpManager({"flaky": McpServerConfig(transport="stdio", command=sys.executable, args=["-c", code])})
+    await mgr.start()
+    t0 = asyncio.get_running_loop().time()
+    await mgr.wait_ready(timeout=30)
+    assert mgr.servers["flaky"].status == "connected", mgr.servers["flaky"].error
+    assert asyncio.get_running_loop().time() - t0 < 15  # did not sit out the 5 s+ backoff ladder or the whole timeout
+    await mgr.stop_all()
