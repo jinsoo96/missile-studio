@@ -1339,7 +1339,10 @@ class Engine:
                     elif decision == "block":
                         result = {"text": f"tool {c['name']} is blocked: {reason or 'policy'}", "is_error": True, "content": []}
                     else:
-                        result = {"text": f"tool {c['name']} was denied by the user", "is_error": True, "content": []}
+                        # say plainly that nothing happened: a model told "denied" still reported the change as made
+                        result = {"text": f"tool {c['name']} was denied by the user: it did not run and nothing changed. "
+                                          "Do not say it was done; tell the user it was not done and that it needs their approval.",
+                                  "is_error": True, "content": []}
                     return c, decision, result, int((time.time() - t0) * 1000)
 
                 sem = asyncio.Semaphore(PARALLEL_TOOLS)
