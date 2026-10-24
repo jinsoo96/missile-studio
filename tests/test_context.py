@@ -121,3 +121,38 @@ def test_long_tool_loop_on_a_small_model_folds_instead_of_failing(client):
     # the stored thread still has every step
     msgs = client.get(f"/api/conversations/{conv['id']}", headers=H).json()["messages"]
     assert sum(1 for m in msgs if m["role"] == "tool") == 8
+
+
+def test_cap_images_keeps_newest_images_only():
+    from missile_studio.engine import _cap_images
+
+    def img(n):
+        return {"role": "user", "content": [{"type": "text", "text": f"(image {n})"}, {"type": "image_url", "image_url": {"url": f"data:{n}"}}]}
+
+    msgs = [{"role": "system", "content": "sys"}] + [img(k) for k in range(6)] + [{"role": "user", "content": "now"}]
+    out = _cap_images(msgs, 4)
+    kept = [p["image_url"]["url"] for m in out if isinstance(m.get("content"), list) for p in m["content"] if p.get("type") == "image_url"]
+    assert kept == ["data:2", "data:3", "data:4", "data:5"]
+    assert out[1]["content"].startswith("(an image shown earlier was omitted") and out[-1]["content"] == "now"
+    assert _cap_images(msgs, 0) is msgs  # no known cap: untouched
+    two = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:a"}}, {"type": "image_url", "image_url": {"url": "data:b"}}]}]
+    assert [p["image_url"]["url"] for p in _cap_images(two, 1)[0]["content"]] == ["data:b"]
+
+
+def test_image_limit_400_is_learned_and_older_images_are_left_out(client):
+    """vLLM answers 400 'At most N image(s) may be provided in one prompt': the provider remembers N and the request is sent again
+    with only the newest N images (a contact-sheet tool called many times piles images up long before the context is full)."""
+    client.post("/api/providers", json={"id": "fake", "kind": "fake", "default_model": "fake-1"}, headers=H)
+    ups = [client.post("/api/upload", files={"file": (f"{k}.png", b"\x89PNG" + bytes([k]), "image/png")}, headers=H).json() for k in range(3)]
+    conv = client.post("/api/conversations", json={}, headers=H).json()
+    FakeProvider.script = [
+        [{"type": "error", "message": 'HTTP 400: {"error":{"message":"At most 2 image(s) may be provided in one prompt. (parameter=image)"}}'}],
+        [{"type": "text_delta", "text": "seen"}, {"type": "done", "finish_reason": "stop"}],
+    ]
+    events = _chat(client, conv["id"], "look", attachments=ups, tools="none")
+    assert not any(e["type"] == "error" for e in events)
+    assert "".join(e["text"] for e in events if e["type"] == "text_delta") == "seen"
+    sent = FakeProvider.seen[-1]
+    assert sum(1 for m in sent if isinstance(m.get("content"), list) for p in m["content"] if p.get("type") == "image_url") == 2
+    prov = next(p for p in client.get("/api/providers", headers=H).json() if p["id"] == "fake")
+    assert prov.get("max_images") == 2

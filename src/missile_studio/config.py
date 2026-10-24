@@ -76,6 +76,9 @@ class ProviderConfig(BaseModel):
     password: str = ""
     allow_insecure_tls: bool = False
     context_window: int = 0  # tokens the model accepts; 0 = a sensible guess per kind (used for compaction)
+    # images the model accepts in one request (vLLM --limit-mm-per-prompt); 0 = no known cap. Learned automatically from
+    # the server's "At most N image(s)" answer, then older images are left out of what the model is sent.
+    max_images: int = 0
     # tools described in the prompt and called with <tool_call> text blocks: for servers that reject tool
     # definitions (vLLM without a tool-call parser). Switched on automatically the first time such a server answers 400.
     tools_via_prompt: bool = False

@@ -281,6 +281,41 @@ def _is_tool_result(m: dict) -> bool:
     return m.get("role") == "tool" or (m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].startswith("<tool_response>"))
 
 
+_IMG_ERR = re.compile(r"at most (\d+) image|(\d+) images? (?:per|in one) (?:prompt|request)|too many images", re.I)
+
+
+def _has_image(m: dict) -> bool:
+    return isinstance(m.get("content"), list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])
+
+
+def _cap_images(messages: list[dict], cap: int) -> list[dict]:
+    """Keep only the newest `cap` images in what the model is sent (older image messages become a one-line note).
+    A tool that returns a picture each call (contact sheets) piles images up long before the context is full,
+    and a vLLM server rejects the whole request past its per-prompt image limit."""
+    if cap <= 0:
+        return messages
+    out, left = list(messages), cap
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        if not _has_image(m):
+            continue
+        n = sum(1 for p in m["content"] if isinstance(p, dict) and p.get("type") == "image_url")
+        if n <= left:
+            left -= n
+        elif left > 0:  # part of this message fits: keep its newest images
+            keep, parts = left, []
+            for p in reversed(m["content"]):
+                if isinstance(p, dict) and p.get("type") == "image_url":
+                    if keep <= 0:
+                        continue
+                    keep -= 1
+                parts.insert(0, p)
+            out[i], left = {**m, "content": parts}, 0
+        else:
+            out[i] = {**m, "content": "(an image shown earlier was omitted: the model accepts only a few images per request)"}
+    return out
+
+
 def _fit_messages(messages: list[dict], limit: int, force: bool = False) -> tuple[list[dict], bool]:
     """Make a request fit a small context: shorten older tool results, keep only the latest image, then drop the
     oldest exchanges from a user-message boundary. The system message and the newest messages survive.
@@ -1086,6 +1121,7 @@ class Engine:
                     ctx_retry = False
                     scanner = ToolCallScanner() if prompt_tools else None
                     messages, trimmed = _fit_messages(messages, input_limit)
+                    messages = _cap_images(messages, int(getattr(pcfg, "max_images", 0) or 0))
                     if trimmed:
                         yield {"type": "status", "event": "context_trimmed", "data": {"tokens": _estimate_tokens(messages), "limit": input_limit}}
                     async for ev in provider.stream(model, messages, llm_tools, options):
@@ -1122,6 +1158,17 @@ class Engine:
                             if not produced and attempt < MAX_RETRIES and _retryable(msg):
                                 retry_wait = min(8.0, 1.5 ** attempt)
                                 error_text = msg
+                                break
+                            img = _IMG_ERR.search(msg)
+                            if not produced and img and pcfg is not None and ctx_shrinks < 2:
+                                # the server takes only N images per request: remember N for this provider and send the newest N
+                                ctx_shrinks += 1
+                                cap = int(next((g for g in img.groups() if g), 0) or 0) or max(1, sum(_has_image(m) for m in messages) - 1)
+                                pcfg.max_images = cap
+                                save_config(self.cfg)
+                                messages = _cap_images(messages, cap)
+                                retry_wait, ctx_retry, error_text = 0.05, True, msg
+                                attempt -= 1
                                 break
                             if not produced and _CTX_ERR.search(msg) and ctx_shrinks < 2:
                                 # the model's limit was hit anyway (our estimate was low): cut harder and send again
