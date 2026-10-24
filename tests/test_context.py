@@ -156,3 +156,25 @@ def test_image_limit_400_is_learned_and_older_images_are_left_out(client):
     assert sum(1 for m in sent if isinstance(m.get("content"), list) for p in m["content"] if p.get("type") == "image_url") == 2
     prov = next(p for p in client.get("/api/providers", headers=H).json() if p["id"] == "fake")
     assert prov.get("max_images") == 2
+
+
+def test_learned_provider_value_does_not_wipe_rules_written_by_another_process(tmp_path, monkeypatch):
+    """A long-running process learns a provider limit and saves only that field: a rule another process added to the
+    file in the meantime stays (it used to save its whole stale in-memory config and wipe such rules)."""
+    import json as _json
+    from missile_studio.config import Config, config_path, load_config, save_config, update_provider_fields
+
+    monkeypatch.setenv("MISSILE_HOME", str(tmp_path))
+    cfg = Config()
+    cfg.ensure_defaults()
+    cfg.providers.append(ProviderConfig(id="p1", kind="openai", base_url="http://x"))
+    save_config(cfg)
+    stale = load_config()  # the long-running process's copy
+    other = load_config()  # another process adds a rule and saves
+    other.tool_policy.rules["srv__tool"] = "allow"
+    save_config(other)
+    update_provider_fields("p1", {"max_images": 4})  # the long-running process learns a limit
+    disk = _json.loads(config_path().read_text(encoding="utf-8"))
+    assert disk["tool_policy"]["rules"].get("srv__tool") == "allow"
+    assert next(p for p in disk["providers"] if p["id"] == "p1")["max_images"] == 4
+    assert stale.tool_policy.rules.get("srv__tool") is None  # (the stale copy alone would have dropped it)

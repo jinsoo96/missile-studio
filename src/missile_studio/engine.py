@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-from .config import AssistantConfig, Config, ProviderConfig, load_config, save_config
+from .config import AssistantConfig, Config, ProviderConfig, config_path, load_config, save_config, update_provider_fields
 from .mcp.manager import SEP, McpManager, ToolInfo
 from .providers import BaseProvider, GenerationOptions, ProviderError, build_provider
 from .providers.base import _json_loads_lenient
@@ -724,7 +724,7 @@ class Engine:
                     asyncio.get_running_loop().create_task(old.aclose())
                 except RuntimeError:  # no running loop (CLI): the old client is just dropped
                     pass
-            save_config(self.cfg)
+            update_provider_fields(pc.id, {"base_url": pc.base_url, "api_key": pc.api_key, "models": pc.models, "default_model": pc.default_model})
             log.info("provider %s follows %s: %s", pc.id, path, pc.base_url)
         return changed
 
@@ -758,7 +758,7 @@ class Engine:
             pc.models = models
             if not pc.default_model and models:
                 pc.default_model = models[0]
-            save_config(self.cfg)
+            update_provider_fields(pc.id, {"models": pc.models, "default_model": pc.default_model})
         return models
 
     async def test_provider(self, pc: ProviderConfig, limit: int = 200) -> dict:
@@ -976,7 +976,29 @@ class Engine:
         parts.insert(0, {"type": "text", "text": text})
         return {"role": "user", "content": parts if len(parts) > 1 else text}
 
+    def _refresh_from_disk(self) -> None:
+        """A long-running server keeps its config in memory. When the file changed (a CLI policy change, another process
+        learning a provider's limits), take the tool policy and the learned provider values from it before the turn, so
+        a later save from this process does not write the stale copy back over them."""
+        try:
+            m = config_path().stat().st_mtime_ns
+        except OSError:
+            return
+        if getattr(self, "_cfg_mtime", None) not in (None, m):
+            try:
+                disk = load_config()
+            except Exception as e:  # a half-written or broken file: keep what we have
+                log.warning("config reload skipped: %s", e)
+                return
+            self.cfg.tool_policy = disk.tool_policy
+            for dp in disk.providers:
+                mine = self.cfg.provider(dp.id)
+                if mine is not None:
+                    mine.max_images, mine.tools_via_prompt = dp.max_images, dp.tools_via_prompt
+        self._cfg_mtime = m
+
     async def run_turn(self, req: TurnRequest) -> AsyncIterator[dict]:
+        self._refresh_from_disk()
         conv = self.store.get_conversation(req.conversation_id)
         if conv is None:
             yield {"type": "error", "message": "conversation not found"}
@@ -1165,7 +1187,7 @@ class Engine:
                                 ctx_shrinks += 1
                                 cap = int(next((g for g in img.groups() if g), 0) or 0) or max(1, sum(_has_image(m) for m in messages) - 1)
                                 pcfg.max_images = cap
-                                save_config(self.cfg)
+                                update_provider_fields(pcfg.id, {"max_images": cap})
                                 messages = _cap_images(messages, cap)
                                 retry_wait, ctx_retry, error_text = 0.05, True, msg
                                 attempt -= 1
@@ -1194,7 +1216,7 @@ class Engine:
                         prompt_tools = True
                         if pcfg is not None:
                             pcfg.tools_via_prompt = True  # remembered: next turns go straight to prompt mode
-                            save_config(self.cfg)
+                            update_provider_fields(pcfg.id, {"tools_via_prompt": True})
                         llm_tools = None
                         messages = [{"role": "system", "content": compose_system()}] + _promptify(messages[1:])
                         yield {"type": "status", "event": "tools_via_prompt", "data": {"provider": pid}}

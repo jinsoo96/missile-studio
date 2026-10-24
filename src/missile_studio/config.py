@@ -352,20 +352,39 @@ def load_config(path: Optional[Path] = None) -> Config:
     return cfg
 
 
-def save_config(cfg: Config, path: Optional[Path] = None) -> Path:
-    p = path or config_path()
+def _write(cfg: Config, p: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(cfg.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+    try:
+        if os.name != "nt":
+            os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def save_config(cfg: Config, path: Optional[Path] = None) -> Path:
+    p = path or config_path()
     with _lock:
-        with tmp.open("w", encoding="utf-8", newline="\n") as f:
-            json.dump(cfg.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
-        os.replace(tmp, p)
-        try:
-            if os.name != "nt":
-                os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
+        _write(cfg, p)
     return p
+
+
+def update_provider_fields(provider_id: str, fields: dict, path: Optional[Path] = None) -> None:
+    """Re-read the file and change only these fields of one provider. A long-running process that saved its whole
+    in-memory config (when a provider followed a moved endpoint) wiped tool-policy rules and learned values that
+    other processes had written in the meantime."""
+    p = path or config_path()
+    with _lock:
+        cur = load_config(p)
+        pc = cur.provider(provider_id)
+        if pc is None:
+            return
+        for k, v in fields.items():
+            setattr(pc, k, v)
+        _write(cur, p)
 
 
 def ensure_token(cfg: Config, persist: bool = True) -> str:
