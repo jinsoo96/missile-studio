@@ -250,7 +250,9 @@ def test_provider_test_with_partial_body_uses_saved_settings(client):
 def test_pages_link_assets_at_the_running_version(client):
     from missile_studio import __version__
 
+    tokens = set()
     for path in ("/", "/admin"):
         html = client.get(path).text
-        versions = set(re.findall(r"\?v=([0-9][\w.+-]*)", html))
-        assert versions == {__version__}, (path, versions)
+        tokens |= set(re.findall(r"\?v=([0-9][\w.+-]*)", html))
+    # one token for every asset link: the running version plus a fingerprint of the static files
+    assert len(tokens) == 1 and next(iter(tokens)).startswith(__version__ + "-"), tokens

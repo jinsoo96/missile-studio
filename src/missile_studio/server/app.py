@@ -14,6 +14,7 @@ Settings-changing routes require the admin role.
 import asyncio
 import base64
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -1173,12 +1174,21 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
-    # the pages carry the running version in their asset links (?v=…): a release no longer has to bump the HTML by hand,
-    # and the tab's update check compares like with like (a page left at an old ?v= reloaded every 45 seconds)
+    # the pages link their assets as ?v=<version>-<fingerprint of the static files>, filled in here: a release no longer
+    # bumps the HTML by hand, and a changed file always gets a new URL. That matters behind the tunnel, which tells
+    # browsers to keep /static for hours whatever the server sends (a fixed app.js at the old URL never reached them).
     asset_v = re.compile(r"\?v=[0-9][\w.+-]*")
 
+    def asset_token() -> str:
+        h = hashlib.sha1()
+        for f in sorted(STATIC.rglob("*")):
+            if f.is_file():
+                st = f.stat()
+                h.update(f"{f.relative_to(STATIC).as_posix()}:{st.st_mtime_ns}:{st.st_size};".encode())
+        return f"{__version__}-{h.hexdigest()[:8]}"
+
     def page(name: str) -> Response:
-        html = asset_v.sub("?v=" + __version__, (STATIC / name).read_text(encoding="utf-8"))
+        html = asset_v.sub("?v=" + asset_token(), (STATIC / name).read_text(encoding="utf-8"))
         return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store, max-age=0, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
 
     @app.get("/")
