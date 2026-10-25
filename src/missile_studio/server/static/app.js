@@ -827,9 +827,20 @@
   async function refreshHealth(force) { if (!S.st) return; try { const h = await api('/api/providers/health'); let changed = false; for (const p of S.st.providers) { const n = h[p.id]; if (n && (p.health?.state !== n.state || p.health?.error !== n.error)) { p.health = n; changed = true; } } if ((changed || force) && S.view === 'chat' && !Object.keys(S.live).length && !/TEXTAREA|INPUT/.test(document.activeElement?.tagName || '')) render(); } catch {} }
   setInterval(() => refreshHealth(false), 60000);
   setInterval(async () => { if (!S.st || S.view !== 'chat') return; try { const before = S.convs.map((c) => c.id + c.running).join(); await loadConvs(); const after = S.convs.map((c) => c.id + c.running).join(); if (before !== after && !Object.keys(S.live).length) { const list = $('.pane'); if (list) list.replaceWith(renderConvPane()); } for (const p of S.panes) { const c = S.convs.find((x) => x.id === p.convId); if (c && c.running && !S.live[p.convId]) attachStream(p, p.convId); } } catch {} }, 6000);
-  // a deployed update: when the server's version no longer matches the assets this tab loaded, reload (between turns) so nobody keeps an old UI
-  const LOADED_VERSION = (document.querySelector('script[src*="app.js"]')?.getAttribute('src') || '').split('v=')[1] || '';
-  setInterval(async () => { try { const h = await fetch('/api/health').then((r) => r.json()); if (LOADED_VERSION && h.version && h.version !== LOADED_VERSION && !Object.keys(S.live).length) { toast(T('Updated to {v}. Reloading…', { v: h.version })); setTimeout(() => location.reload(), 1200); } } catch {} }, 45000);
+  // a deployed update: when the server's version changes after this tab loaded, reload (between turns) so nobody keeps an old UI.
+  // The baseline is the version the server reported at load (set in boot), not the ?v= of the asset links: a release that left
+  // the HTML at an old ?v= made every tab reload every 45 seconds. A version already reloaded for is not reloaded for again.
+  let LOADED_VERSION = '';
+  setInterval(async () => {
+    try {
+      const h = await fetch('/api/health').then((r) => r.json());
+      if (!LOADED_VERSION || !h.version || h.version === LOADED_VERSION || Object.keys(S.live).length) return;
+      let tried = ''; try { tried = sessionStorage.getItem('missile_reloaded_for') || ''; } catch {}
+      if (tried === h.version) return;
+      try { sessionStorage.setItem('missile_reloaded_for', h.version); } catch {}
+      toast(T('Updated to {v}. Reloading…', { v: h.version })); setTimeout(() => location.reload(), 1200);
+    } catch {}
+  }, 45000);
 
   // ---------------------------------------------------------------- intro: what this launchpad does (the mark in the rail, the version chip, once on a first visit)
   const ROCKET = '<svg viewBox="0 0 40 124" width="40" height="124"><defs>'
@@ -1491,6 +1502,7 @@
   async function boot() {
     try { const h = await fetch('/api/health', { headers: headers() }).then((r) => r.json()); S.health = h; if (h.auth_required && !token && !h.signed_in) return showLogin(); } catch {}
     try { await loadState(); await loadConvs(); } catch (e) { if (e.message !== 'unauthorized') toast(e.message, true); return; }
+    LOADED_VERSION = S.st.version || S.health?.version || '';
     try { S.me = await api('/api/admin/auth/me'); } catch { S.me = null; }  // who am I (username, role) for avatars and the session card
     $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
     if (!S.st.providers.length) { S.view = 'settings'; S.settingsPage = 'providers'; }

@@ -1173,14 +1173,22 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
+    # the pages carry the running version in their asset links (?v=…): a release no longer has to bump the HTML by hand,
+    # and the tab's update check compares like with like (a page left at an old ?v= reloaded every 45 seconds)
+    asset_v = re.compile(r"\?v=[0-9][\w.+-]*")
+
+    def page(name: str) -> Response:
+        html = asset_v.sub("?v=" + __version__, (STATIC / name).read_text(encoding="utf-8"))
+        return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store, max-age=0, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
+
     @app.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
+        return page("index.html")
 
     @app.get("/admin")
     @app.get("/admin/{rest:path}")
     async def admin_index(rest: str = ""):
-        return FileResponse(STATIC / "admin.html", headers={"Cache-Control": "no-store, max-age=0, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
+        return page("admin.html")
 
     @app.get("/favicon.ico")
     async def favicon():

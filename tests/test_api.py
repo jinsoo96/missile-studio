@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from pathlib import Path
@@ -244,3 +245,12 @@ def test_provider_test_with_partial_body_uses_saved_settings(client):
     # a masked key in the body still means "the saved one", and a changed field is tested as changed
     client.post("/api/providers/test", json={"id": "vl", "api_key": "vl-s…0001", "base_url": "http://127.0.0.1:2/v1"}, headers=H)
     assert seen == {"base_url": "http://127.0.0.1:2/v1", "kind": "openai", "key": "vl-secret-key-0001"}
+
+
+def test_pages_link_assets_at_the_running_version(client):
+    from missile_studio import __version__
+
+    for path in ("/", "/admin"):
+        html = client.get(path).text
+        versions = set(re.findall(r"\?v=([0-9][\w.+-]*)", html))
+        assert versions == {__version__}, (path, versions)
