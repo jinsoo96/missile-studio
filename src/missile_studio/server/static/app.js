@@ -516,7 +516,9 @@
     const live = pane.convId ? S.live[pane.convId] : null;
     if (!pane.conv || (!pane.messages.length && !live)) {
       const t = targetOf(pane);
-      const sugg = [T('Summarize the files in my workspace'), T('What tools do you have? Show one example each'), T('Write a short project README from notes/'), T('Build a small HTML page that visualizes a to-do list')];
+      // a studio user has no workspace or file tools: their suggestions stay within chat, web search and artifacts
+      const sugg = isAdmin() ? [T('Summarize the files in my workspace'), T('What tools do you have? Show one example each'), T('Write a short project README from notes/'), T('Build a small HTML page that visualizes a to-do list')]
+        : [...(S.st.tools.some((x) => x.name === 'web_search') ? [T("Search the web for this week's AI news and summarize it with sources")] : []), T('Explain how large language models work in five sentences'), T('Draft a polite email asking to move a meeting to next week'), T('Build a small HTML page that visualizes a to-do list')];
       inner.append(el('div', { class: 'empty' }, el('div', { class: 'big' }, STOCK_EMOJI.has(t.assistant?.emoji || '') ? el('span', { html: window.logoMark(56) }) : t.assistant.emoji), el('h3', {}, t.assistant?.name ? T('Chat with {name}', { name: t.assistant.name }) : T('What can I help with?')), el('div', {}, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model) || T('Pick a model')} · ${T('{n} tools', { n: S.st.tools.length })}` : T('Add a provider in Settings to start.')), el('div', { class: 'sugg' }, sugg.map((s) => el('button', { onclick: () => { send(pane, s); } }, s)))));
       return;
     }
@@ -708,9 +710,20 @@
     render();
     try {
       const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ conversation_id: convId, text, provider_id: t.pid, model: t.model, assistant_id: t.aid, attachments: atts, tools: opts.tools !== undefined ? opts.tools : (pane.sel.tools === false ? 'none' : null), thinking: t.thinking, style_id: t.styleId || '', branch_from: opts.branchFrom || '', mode: pane.sel.research ? 'research' : '', knowledge: !!pane.sel.knowledge, permission: permOf(pane) }), signal: live.abort.signal });
-      if (!r.ok) throw new Error((await r.text()) || r.statusText);
+      if (!r.ok) { const raw = await r.text(); let d = raw; try { d = JSON.parse(raw).detail || raw; } catch {} throw new Error(chatRefusal(String(d)) || r.statusText); }
       await pumpStream(r, pane, live);
     } catch (e) { if (e.name !== 'AbortError') content.append(el('div', { class: 'error-line' }, e.message)); await endLive(pane, live); }
+  }
+  // the server's refusals of a turn (limits the admin sets for studio users, maintenance, no model), in the reader's language
+  function chatRefusal(d) {
+    let m;
+    if ((m = /^daily limit reached: (\d+)/.exec(d))) return T('You reached the limit of {n} messages in 24 hours. Try again later.', { n: m[1] });
+    if (d.startsWith('too many answers running')) return T('Too many answers are running. Wait for one to finish.');
+    if ((m = /^storage limit reached \((\d+) MB\)/.exec(d))) return T('Your chats are full ({n} MB). Delete some chats to send more.', { n: m[1] });
+    if ((m = /^attachments too large for one message \((\d+) MB\)/.exec(d))) return T('The attachments are too large for one message ({n} MB).', { n: m[1] });
+    if (d.startsWith('maintenance mode')) return T('Chat is paused by the administrator.');
+    if (d.startsWith('no model is available')) return T('No model is available right now. Ask the administrator.');
+    return d;
   }
   // A turn that is running on the server while this tab was away: replay its buffered events into a live node, then follow.
   async function attachStream(pane, convId) {
@@ -1492,16 +1505,26 @@
       el('div', { class: 'card' }, el('h3', {}, T('Test a search')), q, hits)));
     try { await refresh(); } catch (e) { toast(e.message, true); }
   }
+  // an account changes its own password (a studio user has no admin console); its other browsers are signed out
+  function passwordForm() {
+    const cur = el('input', { class: 'input', type: 'password', autocomplete: 'current-password' }); const nw = el('input', { class: 'input', type: 'password', autocomplete: 'new-password' }); const nw2 = el('input', { class: 'input', type: 'password', autocomplete: 'new-password' });
+    const save = async () => {
+      if (nw.value.length < 8) return toast(T('At least 8 characters'), true);
+      if (nw.value !== nw2.value) return toast(T('The passwords do not match.'), true);
+      try { await api('/api/admin/auth/password', { method: 'POST', body: { current_password: cur.value, new_password: nw.value } }); cur.value = nw.value = nw2.value = ''; if (S.me) S.me.mustChangePassword = false; toast(T('Password changed. Other browsers are signed out.')); } catch (e) { toast(e.message === 'wrong_password' ? T('The current password is wrong.') : e.message, true); }
+    };
+    return el('div', { style: 'display:grid;gap:10px;margin-top:6px' }, el('div', { class: 'sect' }, T('Change password')), S.me?.mustChangePassword ? el('div', { class: 'tiny', style: 'color:var(--warning)' }, T('Your password was set by the admin. Change it in Settings → General.')) : null, field(T('Current password'), cur), el('div', { class: 'grid2' }, field(T('New password'), nw, T('At least 8 characters')), field(T('Repeat'), nw2)), el('div', {}, el('button', { class: 'btn', onclick: save }, T('Change password'))));
+  }
   function pageGeneral(content) {
     const st = S.st;
-    content.append(page('General', 'This studio', el('div', { class: 'card' }, el('h3', {}, T('Server')), el('div', { class: 'grid2' }, field(T('Version'), el('div', {}, 'missile-studio ' + st.version)), field(T('Bound to'), el('div', {}, `${st.server.host}:${st.server.port} · ` + (st.server.auth_required ? T('token required') : T('this machine only, no token')))), field(T('Config file'), el('code', {}, st.config_path)), field(T('Data folder'), el('code', {}, st.home))), el('div', { class: 'muted tiny' }, ...rich(T('Change the host, port or token with {serve} or {token}. The admin console at {admin} manages tokens, logs, retention and system status.'), { serve: el('code', {}, 'ms serve --host 0.0.0.0 --port 7700 --token …'), token: el('code', {}, 'ms config set-token …'), admin: el('a', { href: '/admin', target: '_blank' }, '/admin') }))),
-      st.server.auth_required ? (() => { const who = el('div', { class: 'muted tiny' }, S.health?.via === 'cookie' ? T('Signed in with an account.') : T('Signed in with an access token kept in this browser.')); api('/api/admin/auth/me').then((me) => { who.textContent = T('Signed in as {user} · {role}', { user: me.username, role: T(me.role) }) + ' · ' + (me.role === 'admin' ? T('the same session opens /admin') : T('chat only; settings belong to the admin')); }).catch(() => {}); return el('div', { class: 'card' }, el('h3', {}, T('Session')), who, el('div', {}, el('button', { class: 'btn', onclick: signOut }, I('x', 'sm'), T('Sign out')))); })() : null,
+    content.append(page('General', 'This studio', !isAdmin() ? null : el('div', { class: 'card' }, el('h3', {}, T('Server')), el('div', { class: 'grid2' }, field(T('Version'), el('div', {}, 'missile-studio ' + st.version)), field(T('Bound to'), el('div', {}, `${st.server.host}:${st.server.port} · ` + (st.server.auth_required ? T('token required') : T('this machine only, no token')))), field(T('Config file'), el('code', {}, st.config_path)), field(T('Data folder'), el('code', {}, st.home))), el('div', { class: 'muted tiny' }, ...rich(T('Change the host, port or token with {serve} or {token}. The admin console at {admin} manages tokens, logs, retention and system status.'), { serve: el('code', {}, 'ms serve --host 0.0.0.0 --port 7700 --token …'), token: el('code', {}, 'ms config set-token …'), admin: el('a', { href: '/admin', target: '_blank' }, '/admin') }))),
+      st.server.auth_required ? (() => { const who = el('div', { class: 'muted tiny' }, S.health?.via === 'cookie' ? T('Signed in with an account.') : T('Signed in with an access token kept in this browser.')); api('/api/admin/auth/me').then((me) => { who.textContent = T('Signed in as {user} · {role}', { user: me.username, role: T(me.role) }) + ' · ' + (me.role === 'admin' ? T('the same session opens /admin') : T('chat only; settings belong to the admin')); }).catch(() => {}); return el('div', { class: 'card' }, el('h3', {}, T('Session')), who, el('div', {}, el('button', { class: 'btn', onclick: signOut }, I('x', 'sm'), T('Sign out'))), S.health?.via === 'cookie' ? passwordForm() : null); })() : null,
       el('div', { class: 'card' }, el('h3', {}, T('Language')), el('div', { class: 'row' }, ...['en', 'ko'].map((l) => el('button', { class: 'btn' + (i18n.lang === l ? ' primary' : ''), onclick: () => setLang(l) }, LANG_NAME[l]))), el('div', { class: 'muted tiny' }, T('Kept in this browser. The rail button at the bottom left switches it too.'))),
       el('div', { class: 'card' }, el('h3', {}, T('Appearance')), el('div', { class: 'row' }, el('button', { class: 'btn' + (theme.get() === 'dark' ? ' primary' : ''), onclick: () => theme.set('dark') }, I('moon', 'sm'), T('Dark')), el('button', { class: 'btn' + (theme.get() === 'warm' ? ' primary' : ''), onclick: () => theme.set('warm') }, I('sparkles', 'sm'), T('Warm')), el('button', { class: 'btn' + (theme.get() === 'light' ? ' primary' : ''), onclick: () => theme.set('light') }, I('sun', 'sm'), T('Light'))), el('div', { class: 'muted tiny' }, T('Dark is the default. Warm has cream paper, terracotta accents and serif headings.')),
         el('div', { class: 'sect' }, T('Chat text')), el('div', { class: 'row' }, ...[['s', 'Small'], ['m', 'Default'], ['l', 'Large']].map(([v, l]) => el('button', { class: 'btn sm' + ((view.get('text') || 'm') === v ? ' primary' : ''), onclick: () => view.set('text', v === 'm' ? '' : v) }, T(l))), el('span', { class: 'spacer' }), el('span', { class: 'row tiny' }, switchEl(view.get('wide') === '1', (v) => view.set('wide', v ? '1' : '')), T('Wide chat column')))),
       el('div', { class: 'card' }, el('h3', {}, T('Notifications')), el('div', { class: 'row' }, switchEl(notifyOn(), (v) => setNotify(v)), T('Notify me when an answer finishes while this tab is in the background')), el('div', { class: 'muted tiny' }, T('The tab title gets a ● either way. Kept in this browser.'))),
       el('div', { class: 'card' }, el('h3', {}, T('Keyboard')), el('div', {}, el('button', { class: 'btn', onclick: openShortcuts }, I('info', 'sm'), T('Show all shortcuts') + ' (Ctrl/⌘ /)'))),
-      el('div', { class: 'card' }, el('h3', {}, T('Use this studio elsewhere')), el('div', { class: 'md', html: md(T('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for other MCP clients: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)')) }))));
+      !isAdmin() ? null : el('div', { class: 'card' }, el('h3', {}, T('Use this studio elsewhere')), el('div', { class: 'md', html: md(T('- **Terminal / SSH**: `ms chat`, `ms ask "…" --json`\n- **As one MCP server** for other MCP clients: `ms hub` (stdio) or `ms hub --http --port 7701`\n- **Lend tools to an agent server**: `ms bridge --provider <id>`\n- **API**: `Authorization: Bearer <token>`, docs at [/api/docs](/api/docs)')) }))));
   }
 
   // ---------------------------------------------------------------- boot
@@ -1511,8 +1534,9 @@
     LOADED_VERSION = S.st.version || S.health?.version || '';
     try { S.me = await api('/api/admin/auth/me'); } catch { S.me = null; }  // who am I (username, role) for avatars and the session card
     $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
-    if (!S.st.providers.length) { S.view = 'settings'; S.settingsPage = 'providers'; }
+    if (isAdmin() && !S.st.providers.length) { S.view = 'settings'; S.settingsPage = 'providers'; }
     render();
+    if (!isAdmin() && S.me?.mustChangePassword) toast(T('Your password was set by the admin. Change it in Settings → General.'));
     let introSeen = true; try { introSeen = !!localStorage.getItem('missile_intro_seen'); } catch {}
     if (!introSeen && S.view === 'chat') openIntro();
     setInterval(async () => { if (S.view.startsWith('settings') && (S.settingsPage === 'mcp' || S.settingsPage === 'agents')) { try { await loadState(); } catch {} } }, 6000);

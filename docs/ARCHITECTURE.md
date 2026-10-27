@@ -152,6 +152,23 @@ only in their own chats, and anyone else's chat answers 404. Their turns carry
 mode, so the local shell, file tools and `fetch_url`, the memories and the knowledge base never reach a
 user's chat (memory recall and knowledge excerpts are skipped too). The workspace, memory, knowledge
 and MCP export routes are admin-only, and `/api/state` lists only the tools the principal can use.
+For a user, `/api/state`, `/api/providers`, `/api/mcp`, `/api/policy`, `/api/wake` and `/api/bridge`
+return a trimmed view (allowed providers and models without addresses or keys, MCP servers by name
+only and only at `read-only`, no paths); `/api/health` shows the data folder to admins only. The chat
+route picks a user's model itself (`user_targets` / `pick_user_target`: their pick when the admin's
+`user_models` allows it, else the first allowed one, skipping providers the health probe marks down)
+and refuses a turn past `user_daily_turns`, `user_concurrent_turns` or `user_storage_mb`. A user's
+image uploads are not written to the workspace.
+
+**Sessions.** The session JWT carries `t` (issue time with fractions). An account row with
+`disabled = 1`, or whose `sessions_after` is later than `t` (set by a password change, an admin reset or
+*sign out everywhere*), is no session. Forwarded-IP headers count for the login limit only when the
+peer is on this machine (a tunnel or reverse proxy), so a direct client cannot rotate them.
+
+**Backups.** `admin.backup_loop` checks every 10 minutes and, when the newest backup is older than
+`backup_interval_hours`, runs `run_backup`: `Store.backup_to` (SQLite online backup) plus `config.json`
+and `secret.key` into a dated folder, pruning to `backup_keep`. The last result is kept in the settings
+table (`backup_last`) for the dashboard warning and the System page.
 
 The admin console (`server/admin.py`, `static/admin.*`) adds a typed settings registry (kind, group,
 choices, min/max; keys backed either by `config.json` or by the `settings` table), dashboard stats

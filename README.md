@@ -118,7 +118,7 @@ the file with `--api-key-env OPENAI_API_KEY`.
 | **Workspace & artifacts** | A panel with the file tree, an editor with saved versions and model edits applied as a diff, and a terminal (admin only, audited). Artifacts preview HTML, SVG, Markdown and JSON in a sandbox. |
 | **Interface** | English or Korean (the rail button, Settings → General, or the palette; the first visit follows the browser). Dark, warm and light themes, chat text size and a wide column. A resizable, hideable sidebar, settings search, `Ctrl/⌘ K` palette, `/` commands and a shortcut sheet (`Ctrl/⌘ /`). Notifications when an answer finishes in a background tab. Works in a phone browser too (the list opens over the chat). |
 | **Hub & agent servers** | `ms hub` exposes every tool (local and MCP) as one MCP server over stdio or HTTP for other clients. Chat with agents on a remote agent platform; `ms bridge` lends this machine's tools to them through missile's policy. |
-| **Admin & accounts** | `/admin`: dashboard, chats, access tokens with `chat` / `admin` scopes, typed settings, events, system status, log tails, retention. Admin and user accounts: a user sees only their own chats and gets only the tools you allow (web search by default, never this machine's shell or files). Sign-up off, by invite code (default) or open. `ms admin …` does the same from the shell. |
+| **Admin & accounts** | `/admin`: dashboard, chats, access tokens with `chat` / `admin` scopes, typed settings, events, system status, log tails, retention. Admin and user accounts: a user sees only their own chats and gets only the models and tools you allow (web search by default, never this machine's shell or files), within per-user limits on messages a day, answers at once and storage. Lock an account or sign it out everywhere. Sign-up off, by invite code (default) or open, with a cap. Daily backups of the database, config and key. `ms admin …` does the same from the shell. |
 | **Remote** | Browser sign-in (30-day sessions) or an access token, generated automatically on a non-loopback bind. SSH port-forward friendly; recipes for Tailscale, Cloudflare Tunnel, Docker, systemd and a Windows scheduled task. |
 
 PDF text in attachments and the knowledge base needs `pip install pypdf`.
@@ -161,7 +161,7 @@ src/missile_studio/
   knowledge.py       chunks, keyword search, optional embeddings, rank fusion
   wake.py            wake commands with progress for servers that sleep
   server/app.py      FastAPI JSON API + SSE chat + auth (owner token, scoped tokens, admin sessions)
-  server/admin.py    admin console backend: sessions, typed settings, dashboard, tokens, events, retention
+  server/admin.py    admin console backend: sessions, typed settings, dashboard, tokens, events, retention, backups
   server/static/     web UI + admin UI (vanilla JS, no build step); i18n.js holds the Korean text
   tui.py / cli.py    terminal chat, one-shot ask, management commands
   hub.py             everything as one MCP server

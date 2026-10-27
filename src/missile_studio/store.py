@@ -130,6 +130,12 @@ class Store:
         acols = {r[1] for r in conn.execute("PRAGMA table_info(admin_users)").fetchall()}
         if acols and "role" not in acols:
             conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")  # admin | user (sign-ups)
+        if acols and "disabled" not in acols:
+            conn.execute("ALTER TABLE admin_users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")  # cannot sign in, live sessions stop working
+        if acols and "sessions_after" not in acols:
+            conn.execute("ALTER TABLE admin_users ADD COLUMN sessions_after REAL NOT NULL DEFAULT 0")  # sessions issued before this are signed out
+        if acols and "weak_password" not in acols:
+            conn.execute("ALTER TABLE admin_users ADD COLUMN weak_password INTEGER NOT NULL DEFAULT 0")  # seen at the last sign-in, see admin.is_weak_password
         ccols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
         if "summary" not in ccols:
             conn.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''")  # compacted earlier history
@@ -178,6 +184,7 @@ class Store:
             conn.execute("ALTER TABLE conversations ADD COLUMN pinned REAL NOT NULL DEFAULT 0")  # when it was pinned to the top (0 = not pinned)
         if "owner" not in cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN owner TEXT NOT NULL DEFAULT ''")  # '' = the admins' chats, else the studio user who made it
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_owner ON conversations(owner)")
         # legacy linear conversations: chain by seq and point head at the last message
         for row in conn.execute("SELECT id FROM conversations WHERE head_id IS NULL").fetchall():
             ids = [r[0] for r in conn.execute("SELECT id FROM messages WHERE conversation_id=? ORDER BY seq", (row[0],)).fetchall()]
@@ -543,7 +550,7 @@ class Store:
 
     # ---- admin users
     def list_admins(self) -> list[dict]:
-        return [dict(r) for r in self._conn().execute("SELECT id, username, role, must_change_password, created_at, last_login_at FROM admin_users ORDER BY id").fetchall()]
+        return [dict(r) for r in self._conn().execute("SELECT id, username, role, must_change_password, created_at, last_login_at, disabled, weak_password FROM admin_users ORDER BY id").fetchall()]
 
     def get_admin(self, username: str) -> Optional[dict]:
         row = self._conn().execute("SELECT * FROM admin_users WHERE username=?", (username,)).fetchone()
@@ -561,6 +568,15 @@ class Store:
 
     def touch_admin_login(self, username: str) -> None:
         self._conn().execute("UPDATE admin_users SET last_login_at=? WHERE username=?", (time.time(), username))
+
+    def set_admin_fields(self, username: str, **fields: Any) -> bool:
+        """Update an account's disabled / sessions_after / weak_password / must_change_password."""
+        allowed = {k: v for k, v in fields.items() if k in ("disabled", "sessions_after", "weak_password", "must_change_password")}
+        if not allowed:
+            return False
+        sets = ", ".join(f"{k}=?" for k in allowed)
+        cur = self._conn().execute(f"UPDATE admin_users SET {sets} WHERE username=?", (*allowed.values(), username))
+        return cur.rowcount > 0
 
     def delete_admin(self, username: str) -> bool:
         cur = self._conn().execute("DELETE FROM admin_users WHERE username=?", (username,))
@@ -704,6 +720,49 @@ class Store:
             a["input_tokens"] += int(u.get("input_tokens", 0) or 0)
             a["output_tokens"] += int(u.get("output_tokens", 0) or 0)
         return sorted(agg.values(), key=lambda x: -x["turns"])[:limit]
+
+    # ---- per-owner use (studio users' limits and the admin's usage table)
+    def owner_turns_since(self, owner: str, since: float) -> int:
+        """Messages the owner sent since ``since`` (one per turn they started)."""
+        return self._conn().execute("SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.owner=? AND m.role='user' AND m.created_at>=?", (owner, since)).fetchone()[0]
+
+    def owner_bytes(self, owner: str) -> int:
+        """What the owner's chats take in the database (attached images are stored inline, so they dominate)."""
+        return int(self._conn().execute("SELECT COALESCE(SUM(LENGTH(m.content)),0) FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.owner=?", (owner,)).fetchone()[0])
+
+    def usage_by_owner(self, since: float, limit: int = 20) -> list[dict]:
+        """Per owner ('' = the admins): turns and tokens since ``since``, chats and stored bytes overall."""
+        c = self._conn()
+        agg: dict[str, dict] = {}
+        for r in c.execute("SELECT owner, COUNT(*) AS chats FROM conversations GROUP BY owner").fetchall():
+            agg[r["owner"]] = {"owner": r["owner"], "chats": r["chats"], "turns": 0, "input_tokens": 0, "output_tokens": 0, "bytes": 0}
+        for r in c.execute("SELECT c.owner AS owner, COALESCE(SUM(LENGTH(m.content)),0) AS b FROM messages m JOIN conversations c ON c.id=m.conversation_id GROUP BY c.owner").fetchall():
+            if r["owner"] in agg:
+                agg[r["owner"]]["bytes"] = int(r["b"])
+        for r in c.execute("SELECT c.owner AS owner, m.role AS role, m.content AS content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.created_at>=? AND m.role IN ('user','assistant')", (since,)).fetchall():
+            a = agg.get(r["owner"])
+            if a is None:
+                continue
+            if r["role"] == "user":
+                a["turns"] += 1
+                continue
+            try:
+                u = (json.loads(r["content"]).get("meta") or {}).get("usage") or {}
+            except Exception:
+                continue
+            a["input_tokens"] += int(u.get("input_tokens", 0) or 0)
+            a["output_tokens"] += int(u.get("output_tokens", 0) or 0)
+        return sorted(agg.values(), key=lambda x: (-x["turns"], -x["bytes"]))[:limit]
+
+    def backup_to(self, dest: Path) -> int:
+        """A consistent copy of the live database (SQLite online backup, safe while the server writes). Returns its size."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        out = sqlite3.connect(str(dest))
+        try:
+            self._conn().backup(out)
+        finally:
+            out.close()
+        return dest.stat().st_size
 
     def totals(self) -> dict:
         c = self._conn()

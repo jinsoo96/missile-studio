@@ -42,7 +42,7 @@ from .. import __version__
 from ..config import PROVIDER_PRESETS, AssistantConfig, BuiltinTools, McpServerConfig, ModelPreset, PromptConfig, ProviderConfig, StyleConfig, ToolPolicy, config_path, ensure_token, home_dir
 from ..device_bridge import DeviceBridge
 from ..providers.probe import candidates as probe_candidates
-from ..engine import Engine, TurnRequest
+from ..engine import Engine, TurnRequest, _endpoint_model
 from ..providers.base import ProviderError
 from ..wake import WakeManager
 from ..mcp.importers import export_standard, import_from, known_sources, parse_servers
@@ -208,6 +208,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     app.state.bridges = {}
     app.state.turn_tasks = {}
     app.state.turn_streams = {}
+    app.state.turn_owner = {}  # conversation id -> owner of the running turn (studio users' concurrency limit)
     app.state.provider_health = {}  # provider id -> {"state": ok|down|nokey|unknown, "error", "checked_at", "ms"}
 
     async def on_wake_done(server: str, ok: bool) -> None:
@@ -294,7 +295,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
                 payload = adminmod.jwt_decode(sess)
                 if payload and payload.get("typ") == "admin":
                     acct = store.get_admin(payload.get("sub", ""))
-                    if acct:  # the role comes from the account row, so a demotion applies to live sessions too
+                    # the role comes from the account row, so a demotion applies to live sessions too; a locked
+                    # account, or a session older than its last password change / "sign out everywhere", is no session
+                    if acct and not acct.get("disabled") and float(payload.get("t", payload.get("iat", 0))) >= float(acct.get("sessions_after") or 0):
                         p = {"role": acct.get("role") or "admin", "actor": payload["sub"], "via": "cookie"}
         if p["role"] == "anon" and not tok:
             host = request.client.host if request.client else ""
@@ -349,6 +352,74 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         level = str(store.get_setting("user_tools", "web") or "web")
         return level if level in ("none", "web", "read-only") else "none"
 
+    def is_admin(request: Request) -> bool:
+        return principal_of(request)["role"] == "admin"
+
+    def user_targets() -> list[tuple[str, str]]:
+        """The models a studio user may chat with (admin setting user_models), in the admin's order, as (provider, model);
+        model '' = any model of that provider. An empty setting means the studio's default model only."""
+        raw = str(store.get_setting("user_models", "") or "")
+        out: list[tuple[str, str]] = []
+        for item in raw.replace("\n", ",").split(","):
+            pid, _, model = item.strip().partition(":")
+            pc = engine.cfg.provider(pid.strip()) if pid.strip() else None
+            if pc is not None and pc.enabled:
+                out.append((pc.id, model.strip()))
+        if not raw.strip():
+            try:
+                out = [engine.resolve_target()]
+            except ProviderError:
+                out = []
+        return out
+
+    def user_may_use(pid: str, model: str, targets: list[tuple[str, str]]) -> bool:
+        return any(tp == pid and (not tm or tm == model) for tp, tm in targets)
+
+    def pick_user_target(want_pid: str, want_model: str) -> tuple[str, str]:
+        """Where a studio user's turn goes: what they picked when it is allowed, else the first allowed model; when that
+        provider is known to be down, the next allowed one that is not."""
+        targets = user_targets()
+        if not targets:
+            raise HTTPException(503, "no model is available to studio users; the admin sets them in /admin → Settings → Studio users")
+
+        order: list[tuple[str, str]] = []
+        for tp, tm in targets:
+            if want_pid and tp == want_pid and (not tm or not want_model or tm == want_model):
+                order.append((tp, tm or want_model))  # their pick (an entry naming one model narrows it to that model)
+                break
+        order += [t for t in targets if t not in order]
+        healthy = [t for t in order if app.state.provider_health.get(t[0], {}).get("state") not in ("down", "nokey")]
+        for pid, model in healthy or order:
+            try:
+                return engine.resolve_target(pid, model)
+            except ProviderError:
+                continue
+        raise HTTPException(503, "no model is available to studio users right now")
+
+    def public_providers() -> list[dict]:
+        """What a studio user sees of the providers: the allowed ones and models only, no addresses, keys or headers."""
+        targets = user_targets()
+        out = []
+        for pc in engine.cfg.providers:
+            mine_ = [tm for tp, tm in targets if tp == pc.id]
+            if not mine_:
+                continue
+            models = list(pc.models) if "" in mine_ else [m for m in mine_ if m]
+            em = _endpoint_model(pc)
+            if em:
+                models = [em]
+            dm = pc.default_model if pc.default_model in models else (models[0] if models else "")
+            h = app.state.provider_health.get(pc.id, {})
+            out.append({"id": pc.id, "kind": pc.kind, "label": pc.label or pc.id, "models": models, "default_model": dm, "enabled": True, "context_window": pc.context_window, "max_images": pc.max_images, "health": {"state": h.get("state", "unknown"), "error": "", "checked_at": h.get("checked_at", 0), "ms": h.get("ms", 0)}})
+        return out
+
+    def public_mcp(request: Request) -> list[dict]:
+        """A studio user sees the MCP servers only when their chats get MCP tools (user_tools read-only), and then just
+        name, status and tool count, never commands, paths, env or headers."""
+        if user_tools_of(request) != "read-only":
+            return []
+        return [{"name": s["name"], "status": s["status"], "tool_count": s.get("tool_count", 0), "error": "", "config": {}} for s in engine.mcp.status() if s["status"] == "connected"]
+
     @app.on_event("startup")
     async def _startup():
         await engine.start()
@@ -362,10 +433,11 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         store.event("info", "system", "server started", {"version": __version__, "host": engine.cfg.server.host, "port": engine.cfg.server.port}, actor="system")
         app.state.retention_task = asyncio.create_task(adminmod.retention_loop(engine, store))
         app.state.health_task = asyncio.create_task(health_loop())
+        app.state.backup_task = asyncio.create_task(adminmod.backup_loop(store))
 
     @app.on_event("shutdown")
     async def _shutdown():
-        for name in ("retention_task", "health_task"):
+        for name in ("retention_task", "health_task", "backup_task"):
             t = getattr(app.state, name, None)
             if t:
                 t.cancel()
@@ -377,7 +449,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     @app.get("/api/health")
     async def health(request: Request):
         p = principal_of(request)  # lets the UI skip its login screen when a cookie session or token cookie is already valid
-        return {"ok": True, "version": __version__, "auth_required": bool(app.state.token), "signed_in": p["role"] != "anon", "via": p.get("via", ""), "signup": str(store.get_setting("signup_mode", "invite") or "invite"), "home": str(home_dir()), "maintenance": bool(store.get_setting("maintenance_mode", False))}
+        return {"ok": True, "version": __version__, "auth_required": bool(app.state.token), "signed_in": p["role"] != "anon", "via": p.get("via", ""), "signup": str(store.get_setting("signup_mode", "invite") or "invite"), "home": str(home_dir()) if p["role"] == "admin" else "", "maintenance": bool(store.get_setting("maintenance_mode", False))}
 
     @app.post("/api/login")
     async def login(body: LoginIn):
@@ -394,7 +466,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         cfg = engine.cfg
         p = principal_of(request)
         engine.sync_endpoints()
-        return {
+        out = {
             "version": __version__,
             "home": str(home_dir()),
             "config_path": str(config_path()),
@@ -421,6 +493,32 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "styles": [st.model_dump() for st in cfg.styles],
             "prompts": [pr.model_dump() for pr in cfg.prompts],
         }
+        if p["role"] == "admin":
+            return out
+        targets = user_targets()
+        try:
+            first = pick_user_target("", "")  # the model a new chat of theirs would actually get (skips one that is down)
+        except HTTPException:
+            first = ("", "")
+        out.update({
+            "home": "",
+            "config_path": "",
+            "providers": public_providers(),
+            "wake": [],
+            "presets": [],
+            "default": {**cfg.default.model_dump(), "provider": first[0], "model": first[1]},
+            "mcp": public_mcp(request),
+            "policy": {"default": "block", "read_only_default": "allow", "rules": {}},
+            "builtin_tools": {},
+            "memory": {"enabled": False, "recall_k": 0},
+            "server": {"auth_required": bool(app.state.token)},
+            "approvals": [a.as_dict() for a in engine.approvals.pending.values() if mine(request, a.conversation_id)],
+            "bridges": [],
+            "model_presets": [mp.model_dump() for mp in cfg.effective_presets() if user_may_use(mp.provider, mp.model, targets)],
+            "presets_configured": False,
+            "selection_issues": [],
+        })
+        return out
 
     @app.put("/api/presets", dependencies=[admin_dep])
     async def put_presets(body: list[ModelPreset]):
@@ -462,13 +560,17 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ providers
     @app.get("/api/providers", dependencies=[user_dep])
-    async def providers():
+    async def providers(request: Request):
         engine.sync_endpoints()
+        if not is_admin(request):
+            return public_providers()
         return [_with_health(_mask(p)) for p in engine.cfg.providers]
 
     @app.get("/api/providers/health", dependencies=[user_dep])
-    async def providers_health(refresh: int = 0):
-        """Reachability per provider (ok / down / nokey), from the periodic probe or, with refresh=1, checked now."""
+    async def providers_health(request: Request, refresh: int = 0):
+        """Reachability per provider (ok / down / nokey), from the periodic probe or, with refresh=1, checked now (admins)."""
+        if not is_admin(request):
+            return {p["id"]: p["health"] for p in public_providers()}
         if refresh:
             await refresh_health()
         return {pid: app.state.provider_health.get(pid, {"state": "unknown"}) for pid in (p.id for p in engine.cfg.providers)}
@@ -588,8 +690,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ mcp
     @app.get("/api/mcp", dependencies=[user_dep])
-    async def mcp_status():
-        return engine.mcp.status()
+    async def mcp_status(request: Request):
+        return engine.mcp.status() if is_admin(request) else public_mcp(request)
 
     @app.post("/api/mcp", dependencies=[admin_dep])
     async def mcp_upsert(body: McpIn):
@@ -621,8 +723,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/wake", dependencies=[user_dep])
-    async def wake_status():
-        return app.state.wake.status()
+    async def wake_status(request: Request):
+        return app.state.wake.status() if is_admin(request) else []
 
     @app.post("/api/wake/{name}/cancel", dependencies=[admin_dep])
     async def wake_cancel(name: str):
@@ -665,7 +767,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return visible_tools(request)
 
     @app.get("/api/policy", dependencies=[user_dep])
-    async def get_policy():
+    async def get_policy(request: Request):
+        if not is_admin(request):  # a studio user's chats run read-only whatever the policy says (Engine.decide)
+            return {"default": "block", "read_only_default": "allow", "rules": {}}
         return engine.cfg.tool_policy.model_dump()
 
     @app.put("/api/policy", dependencies=[admin_dep])
@@ -864,6 +968,23 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         check_owner(request, body.conversation_id)
         if body.conversation_id in app.state.turn_tasks:
             raise HTTPException(409, "a turn is already running for this conversation")
+        owner = owner_of(request)
+        if p["role"] != "admin":
+            # a studio user: limits first, then the turn goes to a model they are allowed (and that is up)
+            daily = int(store.get_setting("user_daily_turns", 100) or 0)
+            if daily and store.owner_turns_since(owner, time.time() - 86400) >= daily:
+                raise HTTPException(429, f"daily limit reached: {daily} messages in 24 hours")
+            if sum(1 for cid, o in app.state.turn_owner.items() if o == owner and cid in app.state.turn_tasks) >= max(1, int(store.get_setting("user_concurrent_turns", 2) or 1)):
+                raise HTTPException(429, "too many answers running at once: wait for one to finish")
+            cap_mb = int(store.get_setting("user_storage_mb", 200) or 0)
+            if cap_mb and store.owner_bytes(owner) >= cap_mb * 1024 * 1024:
+                raise HTTPException(413, f"storage limit reached ({cap_mb} MB): delete some chats to send more")
+            max_mb = int(store.get_setting("upload_max_mb", 25) or 25)
+            if len(json.dumps(body.attachments, ensure_ascii=False)) > max_mb * 1024 * 1024 * 3 // 2:  # base64 inflates files by a third
+                raise HTTPException(413, f"attachments too large for one message ({max_mb} MB)")
+            conv = store.get_conversation(body.conversation_id) or {}
+            want = (body.provider_id, body.model) if body.provider_id else (conv.get("provider_id", ""), conv.get("model", ""))
+            body.provider_id, body.model = pick_user_target(*want)
         if body.branch_from:
             # editing an earlier message: rewind the head to its parent, the new message becomes a sibling
             store.set_head(body.conversation_id, store.parent_of(body.conversation_id, body.branch_from))
@@ -918,10 +1039,12 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             finally:
                 await ts.finish()
                 app.state.turn_tasks.pop(body.conversation_id, None)
+                app.state.turn_owner.pop(body.conversation_id, None)
                 asyncio.get_running_loop().call_later(STREAM_RETENTION, lambda: app.state.turn_streams.pop(body.conversation_id, None) if app.state.turn_streams.get(body.conversation_id) is ts else None)
 
         task = asyncio.create_task(producer())
         app.state.turn_tasks[body.conversation_id] = task
+        app.state.turn_owner[body.conversation_id] = owner
         return StreamingResponse(ts.follow(0), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @app.get("/api/chat/{cid}/stream", dependencies=[user_dep])
@@ -995,12 +1118,15 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ uploads
     @app.post("/api/upload", dependencies=[user_dep])
-    async def upload(file: UploadFile = File(...)):
+    async def upload(request: Request, file: UploadFile = File(...)):
         data = await file.read()
         max_mb = int(store.get_setting("upload_max_mb", 25) or 25)
         if len(data) > max_mb * 1024 * 1024:
             raise HTTPException(413, f"file too large ({max_mb}MB)")
         ctype = file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
+        if ctype.startswith("image/") and not is_admin(request):
+            # a studio user's image goes to the model only: their chats have no file tools, and this machine's disk is not theirs
+            return {"name": file.filename, "data_url": f"data:{ctype};base64,{base64.b64encode(data).decode()}", "size": len(data)}
         if ctype.startswith("image/"):
             # also saved to disk (not just kept as base64 for the model to see): a saved path is something the
             # model can hand to any tool that takes a file or reference-image path, in this MCP server or another
@@ -1035,8 +1161,11 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ agent server
     @app.get("/api/agents/{pid}", dependencies=[user_dep])
-    async def list_agents(pid: str):
+    async def list_agents(pid: str, request: Request):
         from ..providers.agentserver import AgentServerProvider
+
+        if not is_admin(request) and not any(tp == pid for tp, _ in user_targets()):
+            raise HTTPException(404, "no such provider")
 
         p = engine.provider(pid)
         if not isinstance(p, AgentServerProvider):
@@ -1047,8 +1176,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             raise HTTPException(400, str(e))
 
     @app.get("/api/bridge", dependencies=[user_dep])
-    async def bridges():
-        return [b.as_dict() for b in app.state.bridges.values()]
+    async def bridges(request: Request):
+        return [b.as_dict() for b in app.state.bridges.values()] if is_admin(request) else []
 
     @app.post("/api/bridge/start", dependencies=[admin_dep])
     async def bridge_start(body: BridgeIn):

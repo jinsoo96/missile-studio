@@ -18,3 +18,5 @@ node_modules/
 worklogs/
 _wt/
 .playwright-mcp/
+# a data folder kept inside the checkout (MISSILE_HOME=<repo>/home): chats, keys, backups
+home/

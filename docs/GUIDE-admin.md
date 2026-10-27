@@ -26,13 +26,42 @@ rate limited per IP (10/min by default). The owner API token from `config.json` 
 
 | page | what |
 |---|---|
-| Dashboard | warnings with a *Go* link (generated password, no providers, provider without key, failed MCP server, public bind without token, maintenance mode), stat tiles (24 h messages, tool calls, success rate, denied/blocked, running turns, waiting approvals, uptime), 24 h chart, providers & MCP health with **Test** / **Restart**, top tools and model usage for 7 days, recent events. Refreshes every 10 s. |
+| Dashboard | warnings with a *Go* link (generated password, weak admin password, no providers, provider without key, failed MCP server, public bind without token, maintenance mode, backups off or failing, a studio-user model naming a missing provider), stat tiles (24 h messages, tool calls, success rate, denied/blocked, running turns, waiting approvals, uptime), 24 h chart, providers & MCP health with **Test** / **Restart**, top tools and model usage for 7 days, turns / tokens / chats / stored size per account for 7 days, recent events. Refreshes every 10 s. |
 | Chats | every conversation with search and paging (a studio user's chats carry their name), open to read messages and tool audit, delete. |
 | Access tokens | create tokens with scope `chat` (a studio user: talk in its own conversations, approvals, uploads) or `admin` (everything). Shown once; revoke immediately; last-used is tracked. |
-| Settings | typed registry, saved values apply immediately: studio name, maintenance mode, max upload, default provider/model, policy defaults, local tool switches, workspace, owner token rotation, login rate limit, sign-up mode and invite code, studio user tools (`none` / `web` / `read-only`), retention days for chats / events / audit. Only changed keys are sent. Data actions: run retention now, vacuum, export config (secrets stripped). |
+| Settings | typed registry, saved values apply immediately: studio name, maintenance mode, max upload, default provider/model, policy defaults, local tool switches, workspace, owner token rotation, login rate limit, a **Studio users** group (sign-up mode, invite code and sign-up cap, the models and tools users get, their per-user limits), retention days for chats / events / audit, backup interval / count / folder. Only changed keys are sent. Data actions: run retention now, vacuum, export config (secrets stripped). |
 | Events | admin and system log (auth, settings, access, data, system) with level filter and keyset paging; click a row for details. Secrets never appear in details. |
-| System | uptime, process and system memory, disk, database size, bind address, log files with a tail viewer (MCP server stderr lands here). Refreshes every 15 s. |
-| Account | change password, manage admin users. |
+| System | uptime, process and system memory, disk, database size, bind address, log files with a tail viewer (MCP server stderr lands here), backups with **Back up now**. Refreshes every 15 s. |
+| Account | change password, manage accounts: reset a password, **Lock** / **Unlock** (a locked account cannot sign in and its open sessions stop at once), **Sign out everywhere** (ends every session, keeps the password), delete. |
+
+## Sharing the studio (studio users)
+
+Accounts with role `user` chat in their own conversations only. What they get is set under
+Settings → Studio users:
+
+- `user_models`: the models they may use, comma-separated, either a provider id (all of its models) or
+  `provider:model`, e.g. `dashscope, anthropic:claude-haiku-5-5`. The first is the default for their new
+  chats; when the one they picked is down, the next reachable one answers. Empty = only the default
+  model. Their screen lists only these, without addresses, keys or headers.
+- `user_tools`: `none` / `web` / `read-only` (see below). They never see MCP commands, paths or
+  environment, the policy rules, this machine's paths, bridges or wake jobs.
+- limits per user: `user_daily_turns` (messages in 24 h, default 100), `user_concurrent_turns`
+  (answers running at once across their chats, default 2), `user_storage_mb` (what their chats take,
+  attachments included, default 200). A refused message tells them which limit they hit.
+- `signup_max_users`: sign-ups stop at this many user accounts (default 50); accounts you add are not
+  counted against it.
+
+Their image uploads go to the model only, not into the workspace. Each account changes its own
+password under Settings → General; a password change, a reset by an admin or *Sign out everywhere*
+ends that account's other sessions.
+
+## Backups
+
+Every `backup_interval_hours` (default 24, 0 = off) the server copies the database (SQLite online
+backup, safe while it runs), `config.json` and `secret.key` into `<backup_dir>/studio-YYYYmmdd-HHMMSS/`
+(`backup_dir` empty = `<MISSILE_HOME>/backups`) and keeps the newest `backup_keep` (default 7). Point
+`backup_dir` at another disk to survive this one failing. To restore, stop the server and copy the
+three files back into the data folder.
 
 ## Retention
 

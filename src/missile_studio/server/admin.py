@@ -11,8 +11,12 @@ Security model
   (a cross-site page cannot add that header without a CORS preflight, which we never grant).
 - The owner API token (config ``server.token``) and API tokens with the ``admin`` scope may call the
   same endpoints with ``Authorization: Bearer`` (scripts, CLI); they skip the CSRF header.
-- Login attempts are rate limited per client IP (sliding window). Every admin action is written to
-  the ``events`` table; secret values never appear in details.
+- Login attempts are rate limited per client IP (sliding window; forwarded-IP headers count only from a
+  proxy on this machine). Every admin action is written to the ``events`` table; secret values never
+  appear in details.
+- An account can be locked (``disabled``) and its sessions ended (``sessions_after``, compared with the
+  JWT's ``t``): a password change, an admin reset and "sign out everywhere" set it.
+- Backups (``backup_loop`` / ``run_backup``): the database, config.json and secret.key into dated folders.
 """
 
 from __future__ import annotations
@@ -127,11 +131,27 @@ class SlidingWindowLimiter:
 
 
 def client_ip(request: Request) -> str:
-    for h in ("cf-connecting-ip", "x-forwarded-for"):
-        v = request.headers.get(h)
-        if v:
-            return v.split(",")[0].strip()
-    return request.client.host if request.client else "?"
+    peer = request.client.host if request.client else "?"
+    # forwarded headers only count when they come through a proxy on this machine (a tunnel, a reverse proxy);
+    # anyone reaching the port directly could otherwise send a new made-up IP each try and never hit the limit
+    if peer in ("127.0.0.1", "::1", "localhost"):
+        for h in ("cf-connecting-ip", "x-forwarded-for"):
+            v = request.headers.get(h)
+            if v:
+                return v.split(",")[0].strip()
+    return peer
+
+
+COMMON_PASSWORDS = frozenset({"password", "password1", "12345678", "123456789", "1234567890", "qwerty123", "admin123", "admin1234", "letmein1", "iloveyou", "11111111", "00000000", "abcd1234", "qwer1234", "changeme"})
+
+
+def is_weak_password(pw: str) -> bool:
+    """Short, a well-known one, or a word with a few digits stuck on (admin123): worth a warning on the dashboard."""
+    low = pw.lower()
+    if len(pw) < 10 or low in COMMON_PASSWORDS:
+        return True
+    letters, digits = low.rstrip("0123456789"), low[len(low.rstrip("0123456789")):]
+    return letters.isalpha() and len(digits) <= 4 and len(set(low)) < 8
 
 
 # ---------------------------------------------------------------- typed settings registry
@@ -162,13 +182,21 @@ DEFINITIONS: tuple[SettingDef, ...] = (
     SettingDef("workspace", "str", "", "tools", "Folder local tools are confined to (empty = <home>/workspace).", source="config"),
     SettingDef("server_token", "secret", "", "access", "Owner API token. Rotating it logs every browser out.", source="config"),
     SettingDef("login_rate_limit", "int", 10, "access", "Admin login attempts per minute per IP.", min=3, max=100),
-    SettingDef("signup_mode", "enum", "invite", "access", "Who can create an account on the sign-in page: off · invite (needs the code below) · open. New accounts are studio users, not admins.", choices=["off", "invite", "open"]),
-    SettingDef("signup_invite_code", "str", "", "access", "Code a visitor must enter to sign up while signup_mode is invite. Generated at startup when empty."),
-    SettingDef("user_tools", "enum", "web", "access", "Tools in a studio user's chats: none · web (web search and the clock) · read-only (also the read-only tools of the connected MCP servers). Users never get this machine's shell or files, the memories or the knowledge base, and see only their own chats.", choices=["none", "web", "read-only"]),
+    SettingDef("signup_mode", "enum", "invite", "users", "Who can create an account on the sign-in page: off · invite (needs the code below) · open. New accounts are studio users, not admins.", choices=["off", "invite", "open"]),
+    SettingDef("signup_invite_code", "str", "", "users", "Code a visitor must enter to sign up while signup_mode is invite. Generated at startup when empty."),
+    SettingDef("signup_max_users", "int", 50, "users", "Sign-ups stop once this many studio-user accounts exist (0 = no limit). Accounts you add yourself are not limited.", min=0, max=100000),
+    SettingDef("user_models", "str", "", "users", "Models a studio user may chat with, comma-separated: a provider id (all of its models) or provider:model. The first is the default for their new chats; when the chosen one is down, the next reachable one answers. Empty = only the studio's default model. Users see no addresses or keys."),
+    SettingDef("user_tools", "enum", "web", "users", "Tools in a studio user's chats: none · web (web search and the clock) · read-only (also the read-only tools of the connected MCP servers). Users never get this machine's shell or files, the memories or the knowledge base, and see only their own chats.", choices=["none", "web", "read-only"]),
+    SettingDef("user_daily_turns", "int", 100, "users", "Messages one studio user may send in 24 hours (0 = no limit).", min=0, max=100000),
+    SettingDef("user_concurrent_turns", "int", 2, "users", "Answers one studio user may have running at once, across their chats.", min=1, max=50),
+    SettingDef("user_storage_mb", "int", 200, "users", "Space one studio user's chats may take, attachments included; past it they must delete chats to send more (0 = no limit).", min=0, max=100000),
     SettingDef("upload_max_mb", "int", 25, "general", "Largest attachment accepted by the chat.", min=1, max=500),
     SettingDef("retention_days", "int", 0, "retention", "Delete chats idle longer than this (0 = keep forever)."),
     SettingDef("event_retention_days", "int", 365, "retention", "Delete admin/system events older than this."),
     SettingDef("audit_retention_days", "int", 365, "retention", "Delete tool audit rows older than this."),
+    SettingDef("backup_interval_hours", "int", 24, "retention", "Copy the database, config and session key this often (0 = off).", min=0, max=24 * 30),
+    SettingDef("backup_keep", "int", 7, "retention", "Backups to keep; older ones are deleted.", min=1, max=365),
+    SettingDef("backup_dir", "str", "", "retention", "Folder for backups (empty = <data folder>/backups). Another disk survives this one failing."),
 )
 DEF_BY_KEY = {d.key: d for d in DEFINITIONS}
 
@@ -333,9 +361,13 @@ def process_rss() -> int:
             class PMC(ctypes.Structure):
                 _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD), ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t), ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t), ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
 
+            # typed calls: untyped, the 64-bit process handle is cut to 32 bits and the call fails (the page showed 0 B)
+            k32, psapi = ctypes.WinDLL("kernel32"), ctypes.WinDLL("psapi")
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(PMC), wintypes.DWORD]
             pmc = PMC()
             pmc.cb = ctypes.sizeof(PMC)
-            ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.windll.kernel32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb)
+            psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb)
             return int(pmc.WorkingSetSize)
         with open("/proc/self/statm") as f:
             return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
@@ -382,14 +414,27 @@ def system_info(engine, store, app_state) -> dict:
         "bridges": [b.as_dict() for b in getattr(app_state, "bridges", {}).values()],
         "totals": store.totals(),
         "bound": {"host": engine.cfg.server.host, "port": engine.cfg.server.port, "token": bool(app_state.token)},
+        "backups": {"dir": str(backup_root(store)), "items": list_backups(store), "last": store.get_setting("backup_last", None), "interval_hours": int(store.get_setting("backup_interval_hours", 24) or 0)},
     }
 
 
 def warnings_for(engine, store, app_state) -> list[dict]:
     out: list[dict] = []
     admins = store.list_admins()
-    if any(a["must_change_password"] for a in admins):
+    if any(a["must_change_password"] for a in admins if (a.get("role") or "admin") == "admin"):
         out.append({"code": "default_admin_password", "text": "An admin account still uses its generated password.", "fix": "account"})
+    for a in admins:
+        if (a.get("role") or "admin") == "admin" and a.get("weak_password") and not a.get("disabled"):
+            out.append({"code": "weak_admin_password", "text": f"The admin account '{a['username']}' has a weak password.", "fix": "account", "params": {"user": a["username"]}})
+    hours = int(store.get_setting("backup_interval_hours", 24) or 0)
+    last = store.get_setting("backup_last", None) or {}
+    if hours <= 0:
+        out.append({"code": "backup_off", "text": "Automatic backups are off.", "fix": "settings"})
+    elif last and not last.get("ok"):
+        out.append({"code": "backup_failed", "text": f"The last backup failed: {(last.get('error') or '')[:120]}", "fix": "system", "params": {"error": (last.get("error") or "")[:120]}})
+    for item in [x.strip() for x in str(store.get_setting("user_models", "") or "").replace("\n", ",").split(",") if x.strip()]:
+        if engine.cfg.provider(item.partition(":")[0].strip()) is None:
+            out.append({"code": "user_model_unknown", "text": f"Studio-user models: no provider '{item}'.", "fix": "settings", "params": {"item": item}})
     if not engine.cfg.providers:
         out.append({"code": "no_providers", "text": "No model provider configured; chats cannot start.", "fix": "settings"})
     for p in engine.cfg.providers:
@@ -431,6 +476,71 @@ async def retention_loop(engine, store, interval: float = 6 * 3600) -> None:
         await asyncio.sleep(interval)
 
 
+# ---------------------------------------------------------------- backups
+
+BACKUP_PREFIX = "studio-"  # studio-YYYYmmdd-HHMMSS/ : only folders named like this are ever pruned
+
+
+def backup_root(store) -> Path:
+    raw = str(store.get_setting("backup_dir", "") or "").strip()
+    return Path(raw).expanduser() if raw else home_dir() / "backups"
+
+
+def list_backups(store) -> list[dict]:
+    root = backup_root(store)
+    out = []
+    if root.is_dir():
+        for p in root.iterdir():
+            if p.is_dir() and p.name.startswith(BACKUP_PREFIX) and (p / "studio.db").exists():
+                out.append({"name": p.name, "path": str(p), "size": sum(f.stat().st_size for f in p.iterdir() if f.is_file()), "mtime": p.stat().st_mtime})
+    return sorted(out, key=lambda b: b["name"], reverse=True)
+
+
+def run_backup(store, actor: str = "system") -> dict:
+    """Database (online backup) + config.json + secret.key into a new dated folder, then keep the newest backup_keep."""
+    root = backup_root(store)
+    dest = root / time.strftime(f"{BACKUP_PREFIX}%Y%m%d-%H%M%S")
+    n = 1
+    while dest.exists():  # two in the same second (a manual one right after the scheduled one)
+        n += 1
+        dest = root / time.strftime(f"{BACKUP_PREFIX}%Y%m%d-%H%M%S-{n}")
+    try:
+        size = store.backup_to(dest / "studio.db")
+        for src in (config_path(), home_dir() / "secret.key"):
+            if src.exists():
+                shutil.copy2(src, dest / src.name)
+                size += src.stat().st_size
+        keep = max(1, int(store.get_setting("backup_keep", 7) or 7))
+        removed = 0
+        for old in list_backups(store)[keep:]:
+            shutil.rmtree(old["path"], ignore_errors=True)
+            removed += 1
+        res = {"ok": True, "at": time.time(), "path": str(dest), "size": size, "removed": removed}
+        store.event("info", "data", "backup", {"path": str(dest), "size": size, "removed": removed}, actor=actor)
+    except Exception as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        res = {"ok": False, "at": time.time(), "path": str(dest), "error": f"{type(e).__name__}: {e}"[:300]}
+        store.event("error", "data", f"backup failed: {res['error']}", {"path": str(dest)}, actor=actor)
+    store.set_setting("backup_last", res)
+    return res
+
+
+async def backup_loop(store, check_every: float = 600) -> None:
+    """Runs a backup when the newest one is older than backup_interval_hours (checked every 10 minutes, so a restart
+    neither skips a due backup nor takes an extra one)."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            hours = int(store.get_setting("backup_interval_hours", 24) or 0)
+            if hours > 0:
+                last = list_backups(store)
+                if not last or time.time() - last[0]["mtime"] > hours * 3600:
+                    await asyncio.to_thread(run_backup, store)
+        except Exception as e:  # pragma: no cover
+            store.event("warn", "data", f"backup check failed: {e}", actor="system")
+        await asyncio.sleep(check_every)
+
+
 # ---------------------------------------------------------------- router
 
 class LoginIn(BaseModel):
@@ -469,6 +579,10 @@ class AdminIn(BaseModel):
     role: str = "admin"  # admin | user
 
 
+class DisableIn(BaseModel):
+    disabled: bool
+
+
 def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
     """``principal_of(request)`` resolves Bearer/cookie auth to {"role", "actor", "via"}."""
     r = APIRouter(prefix="/api/admin")
@@ -485,7 +599,7 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
     def _issue_session(response: Response, request: Request, user: dict, remember: bool) -> int:
         """Set the session cookie for an account (admin or studio user). Returns the lifetime in seconds."""
         ttl = REMEMBER_TTL if remember else SESSION_TTL
-        tok = jwt_encode({"sub": user["username"], "role": user.get("role") or "admin", "iat": int(time.time()), "exp": int(time.time() + ttl), "typ": "admin"})
+        tok = jwt_encode({"sub": user["username"], "role": user.get("role") or "admin", "iat": int(time.time()), "t": time.time(), "exp": int(time.time() + ttl), "typ": "admin"})  # t: when, to the fraction (sessions_after)
         secure = (request.headers.get("x-forwarded-proto") == "https") or request.url.scheme == "https"
         response.set_cookie(SESSION_COOKIE, tok, httponly=True, samesite="lax", secure=secure, max_age=ttl, path="/")
         store.touch_admin_login(user["username"])
@@ -511,6 +625,12 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         if not user or not verify_password(body.password, user["password_hash"]):
             store.event("warn", "auth", "login failed", {"ip": ip, "username": body.username[:64]})
             raise HTTPException(401, "invalid_credentials")
+        if user.get("disabled"):
+            store.event("warn", "auth", "login refused: account disabled", {"ip": ip}, actor=user["username"])
+            raise HTTPException(403, "account_disabled")
+        weak = is_weak_password(body.password)
+        if bool(user.get("weak_password")) != weak:
+            store.set_admin_fields(user["username"], weak_password=int(weak))
         ttl = _issue_session(response, request, user, body.remember)
         store.event("info", "auth", "login", {"ip": ip, "remember": bool(body.remember)}, actor=user["username"])
         return {"username": user["username"], "role": user.get("role") or "admin", "mustChangePassword": bool(user["must_change_password"]), "expires_in": ttl}
@@ -537,6 +657,10 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
                 raise HTTPException(403, "bad_invite_code")
         if store.get_admin(username):
             raise HTTPException(409, "username_taken")
+        cap = int(store.get_setting("signup_max_users", 50) or 0)
+        if cap and sum(1 for u in store.list_admins() if u.get("role") == "user") >= cap:
+            store.event("warn", "auth", "signup refused: account limit reached", {"ip": ip, "username": username, "limit": cap})
+            raise HTTPException(403, "signup_full")
         store.upsert_admin(username, hash_password(body.password), must_change=False, role="user")
         user = store.get_admin(username)
         ttl = _issue_session(response, request, user, body.remember)
@@ -557,17 +681,28 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         user = store.get_admin(p["actor"]) if p.get("via") == "cookie" else None
         return {"username": p["actor"], "role": p["role"], "via": p.get("via"), "mustChangePassword": bool(user["must_change_password"]) if user else False, "studio_name": store.get_setting("studio_name", "missile-studio")}
 
-    @r.post("/auth/password", dependencies=guarded)
-    async def change_password(body: PasswordIn, request: Request):
+    def signed_in(request: Request) -> dict:
         p = principal_of(request)
-        user = store.get_admin(p["actor"])
+        if p["role"] == "anon":
+            raise HTTPException(401, "unauthorized")
+        return p
+
+    @r.post("/auth/password", dependencies=[Depends(signed_in), Depends(csrf_guard)])
+    async def change_password(body: PasswordIn, request: Request, response: Response):
+        """Any account (admin or studio user) changes its own password. Its other sessions are signed out; this one
+        gets a fresh cookie."""
+        p = principal_of(request)
+        user = store.get_admin(p["actor"]) if p.get("via") == "cookie" else None
         if not user:
-            raise HTTPException(400, "password change needs a cookie session of an admin user")
+            raise HTTPException(400, "password change needs an account session (signed in with a username)")
         if not verify_password(body.current_password, user["password_hash"]):
             raise HTTPException(400, "wrong_password")
         if len(body.new_password) < 8 or body.new_password == body.current_password:
             raise HTTPException(400, "new password must be at least 8 characters and different")
         store.upsert_admin(user["username"], hash_password(body.new_password), must_change=False)
+        store.set_admin_fields(user["username"], sessions_after=time.time(), weak_password=int(is_weak_password(body.new_password)))
+        cur = jwt_decode(request.cookies.get(SESSION_COOKIE, "")) or {}
+        _issue_session(response, request, store.get_admin(user["username"]), int(cur.get("exp", 0)) - int(cur.get("iat", 0)) > SESSION_TTL)
         store.event("info", "auth", "password changed", actor=user["username"])
         return {"ok": True}
 
@@ -582,6 +717,7 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         pw = body.password or secrets.token_urlsafe(12)
         role = body.role if body.role in ("admin", "user") else "admin"
         store.upsert_admin(body.username.strip(), hash_password(pw), must_change=not body.password, role=role)
+        store.set_admin_fields(body.username.strip(), sessions_after=time.time())  # a reset password ends the sessions made with the old one
         store.event("info", "auth", "account upserted", {"username": body.username, "role": role}, actor=p["actor"])
         return {"username": body.username, "role": role, "password": pw if not body.password else None}
 
@@ -596,6 +732,30 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         ok = store.delete_admin(username)
         store.event("info", "auth", "admin user deleted", {"username": username}, actor=p["actor"])
         return {"ok": ok}
+
+    @r.post("/users/{username}/disabled", dependencies=guarded)
+    async def set_disabled(username: str, body: DisableIn, request: Request):
+        """Lock an account (it cannot sign in and its sessions stop working at once) or unlock it."""
+        p = principal_of(request)
+        target = store.get_admin(username)
+        if not target:
+            raise HTTPException(404, "no such account")
+        if body.disabled and username == p["actor"]:
+            raise HTTPException(400, "cannot lock yourself")
+        if body.disabled and (target.get("role") or "admin") == "admin" and sum(1 for u in store.list_admins() if (u.get("role") or "admin") == "admin" and not u.get("disabled")) <= 1:
+            raise HTTPException(400, "keep at least one admin")
+        store.set_admin_fields(username, disabled=int(body.disabled))
+        store.event("info", "auth", "account locked" if body.disabled else "account unlocked", {"username": username}, actor=p["actor"])
+        return {"ok": True}
+
+    @r.post("/users/{username}/signout", dependencies=guarded)
+    async def sign_out_everywhere(username: str, request: Request):
+        """End every session of an account (a lost phone, a shared browser); the password stays."""
+        p = principal_of(request)
+        if not store.set_admin_fields(username, sessions_after=time.time()):
+            raise HTTPException(404, "no such account")
+        store.event("info", "auth", "signed out everywhere", {"username": username}, actor=p["actor"])
+        return {"ok": True}
 
     # ---- dashboard
     @r.get("/overview", dependencies=[Depends(current_admin)])
@@ -614,6 +774,7 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
             "hourly": store.hourly(24),
             "top_tools": store.top_tools(now - 7 * 86400),
             "usage_by_model": store.usage_by_model(now - 7 * 86400),
+            "usage_by_user": store.usage_by_owner(now - 7 * 86400),
             "providers": [{"id": p.id, "kind": p.kind, "label": p.label, "has_key": bool(p.resolved_api_key()), "models": len(p.models), "enabled": p.enabled} for p in engine.cfg.providers],
             "mcp": engine.mcp.status(),
             "bridges": [b.as_dict() for b in getattr(app_state, "bridges", {}).values()],
@@ -669,7 +830,7 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
     # ---- settings
     @r.get("/settings", dependencies=[Depends(current_admin)])
     async def get_settings():
-        return {"items": registry.public_view(), "groups": ["general", "models", "tools", "access", "retention"]}
+        return {"items": registry.public_view(), "groups": ["general", "models", "tools", "access", "users", "retention"]}
 
     @r.put("/settings", dependencies=guarded)
     async def put_settings(body: SettingsIn, request: Request):
@@ -731,6 +892,10 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         after = store.db_size()
         store.event("info", "data", "vacuum", {"before": before, "after": after}, actor=principal_of(request)["actor"])
         return {"before": before, "after": after}
+
+    @r.post("/data/backup", dependencies=guarded)
+    async def backup_now(request: Request):
+        return await asyncio.to_thread(run_backup, store, principal_of(request)["actor"])
 
     @r.get("/data/export", dependencies=[Depends(current_admin)])
     async def export_config():
