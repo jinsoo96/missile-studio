@@ -267,7 +267,9 @@
         el('button', { onclick: () => openPalette(), 'aria-label': T('Search') }, I('search'), el('span', { class: 'tip' }, T('Search & commands') + ' (Ctrl/⌘ K)')),
         el('button', { onclick: () => theme.toggle(), 'aria-label': T('Theme') }, I(cur === 'dark' ? 'moon' : cur === 'warm' ? 'sparkles' : 'sun'), el('span', { class: 'tip' }, T('Theme: {cur} → {next}', { cur: T(cur), next: T(THEMES[(THEMES.indexOf(cur) + 1) % 3]) }))),
         isAdmin() ? el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': T('Admin console') }, I('shield'), el('span', { class: 'tip' }, T('Admin console'))) : null,
-        el('button', { class: 'lang', onclick: () => setLang(other), 'aria-label': T('Language') }, I('globe', 'sm'), el('span', { class: 'lang-badge' }, i18n.lang === 'ko' ? '한국어' : 'EN'), el('span', { class: 'tip' }, `${T('Language')}: ${LANG_NAME[i18n.lang]} → ${LANG_NAME[other]}`))));
+        el('button', { class: 'lang', onclick: () => setLang(other), 'aria-label': T('Language') }, I('globe', 'sm'), el('span', { class: 'lang-badge' }, i18n.lang === 'ko' ? '한국어' : 'EN'), el('span', { class: 'tip' }, `${T('Language')}: ${LANG_NAME[i18n.lang]} → ${LANG_NAME[other]}`)),
+        // sign out where it is seen, not only under Settings › General (only when the server asks for a sign-in)
+        S.st?.server?.auth_required ? el('button', { onclick: signOut, 'aria-label': T('Sign out') }, I('power'), el('span', { class: 'tip' }, T('Sign out'))) : null));
   }
 
   // ---------------------------------------------------------------- list panes
