@@ -96,6 +96,8 @@ LOAD_TOOLS = ToolInfo(
     input_schema={"type": "object", "properties": {"names": {"type": "string", "description": "comma-separated tool names from the catalog, e.g. server__tool"}, "query": {"type": "string", "description": "what you want to do, when unsure of the name"}, "limit": {"type": "integer", "default": 8}}},
     read_only=True,
 )
+# the local tools a studio user's chat may use: none of them reads or writes this machine (fetch_url could reach its network)
+USER_LOCAL_TOOLS = frozenset({"web_search", "now", "load_tools"})
 _WORD = re.compile(r"[a-z0-9]+|[가-힣]+", re.I)
 
 
@@ -592,6 +594,7 @@ class TurnRequest:
     mode: str = ""  # "" | research (plan searches, read sources, write a cited report; more iterations)
     knowledge: bool = False  # force knowledge-base excerpts for this message (otherwise automatic when a knowledge base exists)
     permission: str = ""  # "" | ask | auto | readonly (the chat's permission mode, see Engine.decide)
+    user_tools: str = ""  # set for a studio user's chat (not an admin's): none | web | read-only, see Engine.user_may
 
 
 RESEARCH_PROMPT = (
@@ -805,14 +808,30 @@ class Engine:
             return out
         return allt
 
-    def decide(self, tool: ToolInfo, arguments: dict, conversation_id: str, allow_dangerous: bool = False, permission: str = "") -> tuple[str, str]:
+    @staticmethod
+    def user_may(tool: ToolInfo, level: str) -> bool:
+        """Whether a studio user's chat may call ``tool``. ``level``: none = no tools, web = web search and the clock,
+        read-only = also the read-only tools of the connected MCP servers. This machine's shell and files, the memory and
+        the knowledge base belong to the admins and are never a user's."""
+        if level not in ("web", "read-only"):
+            return False
+        if tool.server == LOCAL:
+            return tool.name in USER_LOCAL_TOOLS
+        return level == "read-only" and tool.read_only and not tool.destructive
+
+    def decide(self, tool: ToolInfo, arguments: dict, conversation_id: str, allow_dangerous: bool = False, permission: str = "", user_tools: str = "") -> tuple[str, str]:
         """Return (decision, reason). decision in allow|ask|block.
         ``permission`` is the chat's mode: "" / "ask" = the policy decides, "auto" = run everything (blocked tools and
-        dangerous shell commands still stop), "readonly" = only read-only tools, the rest is off."""
+        dangerous shell commands still stop), "readonly" = only read-only tools, the rest is off.
+        ``user_tools`` is set for a studio user's chat: only what ``user_may`` allows, always in read-only mode."""
         pol = self.cfg.tool_policy
         rule = match_rule(tool.full_name, pol.rules) or match_rule(f"{tool.server}{SEP}*", pol.rules)
         if rule == "block":
             return "block", f"policy rule for {tool.full_name}"
+        if user_tools:
+            if not self.user_may(tool, user_tools):
+                return "block", "not available to studio users"
+            permission = "readonly"  # whatever mode the chat asked for
         if tool.full_name in self.session_allow.get(conversation_id, set()):
             return "allow", "allowed for this conversation"
         dangerous = tool.server == LOCAL and tool.name == "run_shell" and is_dangerous_command(str(arguments.get("command", "")))
@@ -1027,6 +1046,8 @@ class Engine:
         self.store.update_conversation(req.conversation_id, provider_id=pid, model=model, assistant_id=assistant.id if assistant else "default")
 
         tools = self.tools_for(assistant, req.tools_override) if pcfg and pcfg.kind != "agentserver" else []
+        if req.user_tools:  # a studio user's chat is offered only what user_may allows (decide() refuses the rest too)
+            tools = [t for t in tools if self.user_may(t, req.user_tools)]
         tool_index = {t.full_name: t for t in tools}
         history = self.store.get_messages(req.conversation_id)
         # many tools: send a one-line catalog and only the loaded tools' schemas (see ToolCatalogConfig)
@@ -1077,13 +1098,14 @@ class Engine:
             system += "\n\nInstructions for this chat (they take priority over the defaults above):\n" + chat_cfg["instructions"]
         if summary:
             system += "\n\nEarlier part of this conversation, compacted into a summary:\n" + summary
-        if self.cfg.memory.enabled:
+        own_data = not req.user_tools  # the memories and the knowledge base are the admins'; a studio user's chat sees neither
+        if self.cfg.memory.enabled and own_data:
             mems = self.store.search_memories(req.user_text, self.cfg.memory.recall_k)
             if mems:
                 system += "\n\nThings remembered about the user from earlier chats (use when relevant, do not recite them):\n" + "\n".join(f"- {m['text']}" for m in mems)
         # knowledge: forced for this message, or automatic whenever a knowledge base exists (fewer, shorter excerpts then)
         auto_kb = not req.knowledge and self.cfg.knowledge.auto and len(req.user_text.strip()) >= 8 and self.store.kb_stats()["chunks"] > 0
-        if (req.knowledge or auto_kb) and self.knowledge is not None:
+        if (req.knowledge or auto_kb) and self.knowledge is not None and own_data:
             k, width = (self.cfg.knowledge.top_k, 1500) if req.knowledge else (min(self.cfg.knowledge.top_k, 3), 800)
             hits = await self.knowledge.search(req.user_text, k)
             if hits:
@@ -1335,7 +1357,7 @@ class Engine:
                         if problems:  # guessed argument names: hand back the schema instead of a failed call
                             plan.append((c, tool, "schema", json.dumps({"error": "arguments do not match the tool's schema (the tool was not run); call it again with these arguments", **problems, "input_schema": _compact_schema(tool.input_schema)}, ensure_ascii=False)))
                             continue
-                    decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous, req.permission)
+                    decision, reason = self.decide(tool, args, req.conversation_id, req.allow_dangerous, req.permission, req.user_tools)
                     if decision == "ask":
                         yield {"type": "approval_required", "id": c["id"], "name": c["name"], "arguments": args, "reason": reason}
                         answer = await self.approvals.ask(req.conversation_id, c["id"], c["name"], args, reason)

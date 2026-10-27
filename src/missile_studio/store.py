@@ -176,6 +176,8 @@ class Store:
             conn.execute("ALTER TABLE conversations ADD COLUMN settings TEXT NOT NULL DEFAULT ''")  # per-chat overrides, JSON
         if "pinned" not in cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN pinned REAL NOT NULL DEFAULT 0")  # when it was pinned to the top (0 = not pinned)
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN owner TEXT NOT NULL DEFAULT ''")  # '' = the admins' chats, else the studio user who made it
         # legacy linear conversations: chain by seq and point head at the last message
         for row in conn.execute("SELECT id FROM conversations WHERE head_id IS NULL").fetchall():
             ids = [r[0] for r in conn.execute("SELECT id FROM messages WHERE conversation_id=? ORDER BY seq", (row[0],)).fetchall()]
@@ -187,12 +189,12 @@ class Store:
                 conn.execute("UPDATE conversations SET head_id=? WHERE id=?", (prev, row[0]))
 
     # ---- conversations
-    def create_conversation(self, *, title: str = "", assistant_id: str = "default", provider_id: str = "", model: str = "") -> dict:
+    def create_conversation(self, *, title: str = "", assistant_id: str = "default", provider_id: str = "", model: str = "", owner: str = "") -> dict:
         cid = uuid.uuid4().hex[:16]
         now = time.time()
         self._conn().execute(
-            "INSERT INTO conversations(id,title,assistant_id,provider_id,model,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-            (cid, title, assistant_id, provider_id, model, now, now),
+            "INSERT INTO conversations(id,title,assistant_id,provider_id,model,created_at,updated_at,owner) VALUES (?,?,?,?,?,?,?,?)",
+            (cid, title, assistant_id, provider_id, model, now, now, owner),
         )
         return self.get_conversation(cid)  # type: ignore[return-value]
 
@@ -209,23 +211,27 @@ class Store:
         row = self._conn().execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         return self._conv(row) if row else None
 
-    def list_conversations(self, limit: int = 200, offset: int = 0, q: str = "") -> list[dict]:
+    @staticmethod
+    def _conv_filter(q: str, owner: Optional[str]) -> tuple[str, list]:
+        """WHERE clause for the chat list: a title match and/or one owner (None = every owner)."""
+        where, args = [], []
         if q:
-            rows = self._conn().execute(
-                "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) AS message_count FROM conversations c WHERE title LIKE ? ORDER BY pinned > 0 DESC, updated_at DESC LIMIT ? OFFSET ?",
-                (f"%{q}%", limit, offset),
-            ).fetchall()
-        else:
-            rows = self._conn().execute(
-                "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) AS message_count FROM conversations c ORDER BY pinned > 0 DESC, updated_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+            where.append("title LIKE ?"); args.append(f"%{q}%")
+        if owner is not None:
+            where.append("owner=?"); args.append(owner)
+        return (" WHERE " + " AND ".join(where)) if where else "", args
+
+    def list_conversations(self, limit: int = 200, offset: int = 0, q: str = "", owner: Optional[str] = None) -> list[dict]:
+        cond, args = self._conv_filter(q, owner)
+        rows = self._conn().execute(
+            f"SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) AS message_count FROM conversations c{cond} ORDER BY pinned > 0 DESC, updated_at DESC LIMIT ? OFFSET ?",
+            (*args, limit, offset),
+        ).fetchall()
         return [self._conv(r) for r in rows]
 
-    def count_conversations(self, q: str = "") -> int:
-        if q:
-            return self._conn().execute("SELECT COUNT(*) FROM conversations WHERE title LIKE ?", (f"%{q}%",)).fetchone()[0]
-        return self._conn().execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+    def count_conversations(self, q: str = "", owner: Optional[str] = None) -> int:
+        cond, args = self._conv_filter(q, owner)
+        return self._conn().execute(f"SELECT COUNT(*) FROM conversations{cond}", args).fetchone()[0]
 
     def update_conversation(self, cid: str, touch: bool = True, **fields: Any) -> None:
         """touch=False keeps the chat where it is in the list (a rename or a pin is not activity)."""
@@ -335,29 +341,31 @@ class Store:
         if text:
             self._conn().execute("INSERT INTO messages_fts(text, message_id, conversation_id, role) VALUES (?,?,?,?)", (text, mid, cid, role))
 
-    def search_messages(self, q: str, limit: int = 30) -> list[dict]:
-        """Chats whose messages contain ``q`` (substring, any language), newest first, with a snippet per hit."""
+    def search_messages(self, q: str, limit: int = 30, owner: Optional[str] = None) -> list[dict]:
+        """Chats whose messages contain ``q`` (substring, any language), newest first, with a snippet per hit.
+        ``owner`` keeps the chats of one owner (None = every chat)."""
         q = (q or "").strip()
         if not q:
             return []
         conn = self._conn()
+        mine, mine_args = (" AND c.owner=?", [owner]) if owner is not None else ("", [])
         rows: list = []
         if getattr(self, "fts", False) and len(q) >= 3:
             rows = conn.execute(
                 "SELECT f.message_id, f.conversation_id, f.role, snippet(messages_fts, 0, '[', ']', '…', 18) AS snip, m.created_at, c.title "
                 "FROM messages_fts f JOIN messages m ON m.id=f.message_id JOIN conversations c ON c.id=f.conversation_id "
-                "WHERE messages_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?",
-                (_fts_phrase(q), limit),
+                f"WHERE messages_fts MATCH ?{mine} ORDER BY m.created_at DESC LIMIT ?",
+                (_fts_phrase(q), *mine_args, limit),
             ).fetchall()
         if not rows:  # short queries (trigram needs 3 chars), or no FTS: substring scan over the message text itself
             like = f"%{q}%"
             rows = conn.execute(
                 "WITH t AS (SELECT m.id, m.conversation_id, m.role, m.created_at, c.title, "
                 "CASE WHEN json_type(m.content, '$.content') = 'text' THEN json_extract(m.content, '$.content') ELSE m.content END AS body "
-                "FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.role IN ('user','assistant')) "
+                f"FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.role IN ('user','assistant'){mine}) "
                 "SELECT id, conversation_id, role, replace(substr(body, max(1, instr(body, ?) - 40), 120), ?, '[' || ? || ']'), created_at, title "
                 "FROM t WHERE body LIKE ? ORDER BY created_at DESC LIMIT ?",
-                (q, q, q, like, limit),
+                (*mine_args, q, q, q, like, limit),
             ).fetchall()
         return [{"message_id": r[0], "conversation_id": r[1], "role": r[2], "snippet": r[3], "created_at": r[4], "title": r[5]} for r in rows]
 
@@ -508,21 +516,18 @@ class Store:
             (time.time(), conversation_id, tool, json.dumps(arguments, ensure_ascii=False)[:4000], decision, int(is_error), duration_ms, result_excerpt[:2000]),
         )
 
-    def list_audit(self, limit: int = 200, conversation_id: str = "") -> list[dict]:
-        if conversation_id:
-            rows = self._conn().execute(
-                "SELECT * FROM tool_audit WHERE conversation_id=? ORDER BY ts DESC LIMIT ?", (conversation_id, limit)
-            ).fetchall()
-        else:
-            rows = self._conn().execute("SELECT * FROM tool_audit ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(r) for r in rows]
+    def list_audit(self, limit: int = 200, conversation_id: str = "", owner: Optional[str] = None) -> list[dict]:
+        return self.query_audit(limit=limit, conversation_id=conversation_id, owner=owner)[0]
 
-    def query_audit(self, *, limit: int = 50, offset: int = 0, conversation_id: str = "", q: str = "", decision: str = "", errors: bool = False) -> tuple[list[dict], int]:
+    def query_audit(self, *, limit: int = 50, offset: int = 0, conversation_id: str = "", q: str = "", decision: str = "", errors: bool = False, owner: Optional[str] = None) -> tuple[list[dict], int]:
         """One page of the audit log, newest first, and how many rows match. q matches the tool name, the arguments
-        or the result; decision is one of allow / deny / block / schema / cancelled; errors keeps failed calls only."""
+        or the result; decision is one of allow / deny / block / schema / cancelled; errors keeps failed calls only;
+        owner keeps the calls made in that owner's chats (None = every row)."""
         where, args = [], []
         if conversation_id:
             where.append("conversation_id=?"); args.append(conversation_id)
+        if owner is not None:
+            where.append("conversation_id IN (SELECT id FROM conversations WHERE owner=?)"); args.append(owner)
         if decision:
             where.append("decision=?"); args.append(decision)
         if errors:

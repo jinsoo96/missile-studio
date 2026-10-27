@@ -27,9 +27,9 @@ rate limited per IP (10/min by default). The owner API token from `config.json` 
 | page | what |
 |---|---|
 | Dashboard | warnings with a *Go* link (generated password, no providers, provider without key, failed MCP server, public bind without token, maintenance mode), stat tiles (24 h messages, tool calls, success rate, denied/blocked, running turns, waiting approvals, uptime), 24 h chart, providers & MCP health with **Test** / **Restart**, top tools and model usage for 7 days, recent events. Refreshes every 10 s. |
-| Chats | every conversation with search and paging, open to read messages and tool audit, delete. |
-| Access tokens | create tokens with scope `chat` (talk, own conversations, approvals, uploads) or `admin` (everything). Shown once; revoke immediately; last-used is tracked. |
-| Settings | typed registry, saved values apply immediately: studio name, maintenance mode, max upload, default provider/model, policy defaults, local tool switches, workspace, owner token rotation, login rate limit, retention days for chats / events / audit. Only changed keys are sent. Data actions: run retention now, vacuum, export config (secrets stripped). |
+| Chats | every conversation with search and paging (a studio user's chats carry their name), open to read messages and tool audit, delete. |
+| Access tokens | create tokens with scope `chat` (a studio user: talk in its own conversations, approvals, uploads) or `admin` (everything). Shown once; revoke immediately; last-used is tracked. |
+| Settings | typed registry, saved values apply immediately: studio name, maintenance mode, max upload, default provider/model, policy defaults, local tool switches, workspace, owner token rotation, login rate limit, sign-up mode and invite code, studio user tools (`none` / `web` / `read-only`), retention days for chats / events / audit. Only changed keys are sent. Data actions: run retention now, vacuum, export config (secrets stripped). |
 | Events | admin and system log (auth, settings, access, data, system) with level filter and keyset paging; click a row for details. Secrets never appear in details. |
 | System | uptime, process and system memory, disk, database size, bind address, log files with a tail viewer (MCP server stderr lands here). Refreshes every 15 s. |
 | Account | change password, manage admin users. |

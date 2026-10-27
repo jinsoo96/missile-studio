@@ -143,6 +143,16 @@ Three principals: the **owner token** (`server.token`, admin), **API tokens** fr
 A loopback bind without a token trusts the local user as admin. Settings-changing routes need the
 admin role; chat routes need any principal; maintenance mode turns chat off for non-admins.
 
+**Studio users.** Accounts with role `user` (sign-ups, accounts made as users) and `chat` tokens are
+studio users. `conversations.owner` is `''` for the admins' chats (every chat from before owners
+existed) and the user's name otherwise; a user lists, opens, searches, audits and answers approvals
+only in their own chats, and anyone else's chat answers 404. Their turns carry
+`TurnRequest.user_tools` (admin setting `user_tools`: `none` / `web` / `read-only`, default `web`):
+`Engine.user_may` decides which tools are offered and `decide()` refuses the rest, always in read-only
+mode, so the local shell, file tools and `fetch_url`, the memories and the knowledge base never reach a
+user's chat (memory recall and knowledge excerpts are skipped too). The workspace, memory, knowledge
+and MCP export routes are admin-only, and `/api/state` lists only the tools the principal can use.
+
 The admin console (`server/admin.py`, `static/admin.*`) adds a typed settings registry (kind, group,
 choices, min/max; keys backed either by `config.json` or by the `settings` table), dashboard stats
 computed from `messages` / `tool_audit`, warnings as codes the UI turns into fix-it links, an `events`

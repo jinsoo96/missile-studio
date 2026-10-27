@@ -9,6 +9,10 @@ Auth model
   read-only state) or ``admin`` (everything).
 - Admin console sessions: httpOnly cookie set by /api/admin/auth/login (see admin.py).
 Settings-changing routes require the admin role.
+
+Studio users (role ``user``: sign-ups, accounts made as users, chat tokens) see only their own chats, and their
+chats get only the tools the admin setting ``user_tools`` allows (see Engine.user_may): never this machine's shell
+or files, the memories, the knowledge base or the workspace. Admins share every chat without an owner.
 """
 
 import asyncio
@@ -319,6 +323,32 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
     user_dep = Depends(require_user)
     admin_dep = Depends(require_admin)
 
+    def owner_of(request: Request) -> str:
+        """Whose chats this principal works in: the admins share '' (every chat from before accounts had owners), a studio
+        user (account or chat token) has their own."""
+        p = principal_of(request)
+        return "" if p["role"] == "admin" else p["actor"]
+
+    def check_owner(request: Request, cid: str) -> None:
+        """Admins may open any chat; a studio user only their own (anyone else's looks missing)."""
+        if principal_of(request)["role"] == "admin":
+            return
+        conv = store.get_conversation(cid)
+        if conv is None or conv.get("owner", "") != owner_of(request):
+            raise HTTPException(404, "not found")
+
+    def visible_tools(request: Request) -> list[dict]:
+        """The connected tools as this principal's chats get them: all of them for admins, what user_tools allows for a studio user."""
+        level = user_tools_of(request)
+        return [t.as_dict() for t in engine.all_tools() if not level or Engine.user_may(t, level)]
+
+    def user_tools_of(request: Request) -> str:
+        """The tool level of a studio user's chats (admin setting user_tools); '' for admins, whose chats have no such limit."""
+        if principal_of(request)["role"] == "admin":
+            return ""
+        level = str(store.get_setting("user_tools", "web") or "web")
+        return level if level in ("none", "web", "read-only") else "none"
+
     @app.on_event("startup")
     async def _startup():
         await engine.start()
@@ -375,12 +405,12 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             "default": cfg.default.model_dump(),
             "assistants": [a.model_dump() for a in cfg.assistants],
             "mcp": engine.mcp.status(),
-            "tools": [t.as_dict() for t in engine.all_tools()],
+            "tools": visible_tools(request),
             "policy": cfg.tool_policy.model_dump(),
             "builtin_tools": _builtin_view(cfg),
             "tool_catalog": cfg.tool_catalog.model_dump(),
             "memory": cfg.memory.model_dump(),
-            "knowledge": {**cfg.knowledge.model_dump(), **(engine.knowledge.status() if engine.knowledge else {})},
+            "knowledge": {**cfg.knowledge.model_dump(), **(engine.knowledge.status() if engine.knowledge else {})} if p["role"] == "admin" else {},
             "server": {"host": cfg.server.host, "port": cfg.server.port, "auth_required": bool(app.state.token)},
             "approvals": [a.as_dict() for a in engine.approvals.pending.values()],
             "bridges": [b.as_dict() for b in app.state.bridges.values()],
@@ -625,14 +655,14 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         await engine.mcp.configure(engine.cfg.mcp_servers)
         return {"added": added}
 
-    @app.get("/api/mcp/export", dependencies=[user_dep])
+    @app.get("/api/mcp/export", dependencies=[admin_dep])
     async def mcp_export():
         return export_standard(engine.cfg.mcp_servers)
 
     # ------------------------------------------------------------ tools / policy
     @app.get("/api/tools", dependencies=[user_dep])
-    async def tools():
-        return [t.as_dict() for t in engine.all_tools()]
+    async def tools(request: Request):
+        return visible_tools(request)
 
     @app.get("/api/policy", dependencies=[user_dep])
     async def get_policy():
@@ -656,8 +686,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ search, memory, knowledge
     @app.get("/api/search", dependencies=[user_dep])
-    async def search(q: str = "", limit: int = 30):
-        return {"q": q, "hits": store.search_messages(q, max(1, min(limit, 100)))}
+    async def search(request: Request, q: str = "", limit: int = 30):
+        return {"q": q, "hits": store.search_messages(q, max(1, min(limit, 100)), owner=owner_of(request))}
 
     class MemoryIn(BaseModel):
         text: str
@@ -667,11 +697,11 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         enabled: bool = True
         recall_k: int = 5
 
-    @app.get("/api/memory", dependencies=[user_dep])
+    @app.get("/api/memory", dependencies=[admin_dep])
     async def memory_list(q: str = ""):
         return {"enabled": engine.cfg.memory.enabled, "recall_k": engine.cfg.memory.recall_k, "items": store.search_memories(q, 50) if q else store.list_memories()}
 
-    @app.post("/api/memory", dependencies=[user_dep])
+    @app.post("/api/memory", dependencies=[admin_dep])
     async def memory_add(body: MemoryIn, request: Request):
         if not body.text.strip():
             raise HTTPException(400, "empty")
@@ -679,13 +709,13 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         store.event("info", "data", "memory added", {"id": m["id"]}, actor=principal_of(request)["actor"])
         return m
 
-    @app.put("/api/memory/{mid}", dependencies=[user_dep])
+    @app.put("/api/memory/{mid}", dependencies=[admin_dep])
     async def memory_update(mid: str, body: MemoryIn):
         if not store.update_memory(mid, body.text):
             raise HTTPException(404, "no such memory")
         return store.get_memory(mid)
 
-    @app.delete("/api/memory/{mid}", dependencies=[user_dep])
+    @app.delete("/api/memory/{mid}", dependencies=[admin_dep])
     async def memory_delete(mid: str):
         return {"ok": store.delete_memory(mid)}
 
@@ -725,7 +755,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         top_k: int = 6
         auto: Optional[bool] = None  # retrieve excerpts for every message once something is indexed
 
-    @app.get("/api/knowledge", dependencies=[user_dep])
+    @app.get("/api/knowledge", dependencies=[admin_dep])
     async def knowledge_status():
         return engine.knowledge.status() if engine.knowledge else {"error": "knowledge base unavailable"}
 
@@ -759,7 +789,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         asyncio.create_task(engine.knowledge.reindex())
         return {"ok": True, "started": True}
 
-    @app.get("/api/knowledge/search", dependencies=[user_dep])
+    @app.get("/api/knowledge/search", dependencies=[admin_dep])
     async def knowledge_search(q: str = "", k: int = 6):
         return {"q": q, "hits": await engine.knowledge.search(q, max(1, min(k, 20)))}
 
@@ -775,18 +805,19 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
 
     # ------------------------------------------------------------ conversations
     @app.get("/api/conversations", dependencies=[user_dep])
-    async def conversations():
-        rows = store.list_conversations()
+    async def conversations(request: Request):
+        rows = store.list_conversations(owner=owner_of(request))
         for r in rows:
             r["running"] = r["id"] in app.state.turn_tasks
         return rows
 
     @app.post("/api/conversations", dependencies=[user_dep])
-    async def create_conversation(body: ConvIn):
-        return store.create_conversation(title=body.title, assistant_id=body.assistant_id, provider_id=body.provider_id, model=body.model)
+    async def create_conversation(body: ConvIn, request: Request):
+        return store.create_conversation(title=body.title, assistant_id=body.assistant_id, provider_id=body.provider_id, model=body.model, owner=owner_of(request))
 
     @app.get("/api/conversations/{cid}", dependencies=[user_dep])
-    async def get_conversation(cid: str):
+    async def get_conversation(cid: str, request: Request):
+        check_owner(request, cid)
         conv = store.get_conversation(cid)
         if not conv:
             raise HTTPException(404, "not found")
@@ -795,7 +826,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return conv
 
     @app.patch("/api/conversations/{cid}", dependencies=[user_dep])
-    async def patch_conversation(cid: str, body: dict):
+    async def patch_conversation(cid: str, body: dict, request: Request):
+        check_owner(request, cid)
         allowed = {k: v for k, v in body.items() if k in ("title", "assistant_id", "provider_id", "model", "style_id", "pinned", "settings")}
         if "pinned" in allowed:
             allowed["pinned"] = time.time() if allowed["pinned"] else 0
@@ -806,8 +838,9 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return store.get_conversation(cid)
 
     @app.post("/api/conversations/{cid}/head", dependencies=[user_dep])
-    async def switch_branch(cid: str, body: HeadIn):
+    async def switch_branch(cid: str, body: HeadIn, request: Request):
         """Make a sibling the visible branch: the head moves to the deepest message under it."""
+        check_owner(request, cid)
         if not store.get_conversation(cid):
             raise HTTPException(404, "not found")
         store.set_head(cid, store.leaf_of(cid, body.message_id))
@@ -817,7 +850,8 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return conv
 
     @app.delete("/api/conversations/{cid}", dependencies=[user_dep])
-    async def delete_conversation(cid: str):
+    async def delete_conversation(cid: str, request: Request):
+        check_owner(request, cid)
         store.delete_conversation(cid)
         return {"ok": True}
 
@@ -827,6 +861,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         p = principal_of(request)
         if store.get_setting("maintenance_mode", False) and p["role"] != "admin":
             raise HTTPException(503, "maintenance mode: chat is paused by the administrator")
+        check_owner(request, body.conversation_id)
         if body.conversation_id in app.state.turn_tasks:
             raise HTTPException(409, "a turn is already running for this conversation")
         if body.branch_from:
@@ -848,6 +883,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             mode=body.mode,
             knowledge=body.knowledge,
             permission=body.permission if body.permission in ("ask", "auto", "readonly") else "",
+            user_tools=user_tools_of(request),
         )
         # The turn runs on the server in its own task and writes to a buffer; the browser only *follows* that
         # buffer. Closing the tab therefore does not stop the turn, and a new tab can reattach and replay.
@@ -889,15 +925,17 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return StreamingResponse(ts.follow(0), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @app.get("/api/chat/{cid}/stream", dependencies=[user_dep])
-    async def chat_stream(cid: str, after: int = 0):
+    async def chat_stream(cid: str, request: Request, after: int = 0):
         """Reattach to a running (or just finished) turn: replays buffered events from ``after``, then follows live."""
+        check_owner(request, cid)
         ts = app.state.turn_streams.get(cid)
         if ts is None:
             raise HTTPException(404, "no turn stream for this conversation")
         return StreamingResponse(ts.follow(after), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @app.post("/api/chat/{cid}/stop", dependencies=[user_dep])
-    async def stop_chat(cid: str):
+    async def stop_chat(cid: str, request: Request):
+        check_owner(request, cid)
         task = app.state.turn_tasks.get(cid)
         if task:
             task.cancel()
@@ -905,33 +943,47 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         return {"ok": True, "stopped": False}
 
     # ------------------------------------------------------------ approvals / audit
+    def mine(request: Request, cid: str) -> bool:
+        try:
+            check_owner(request, cid)
+            return True
+        except HTTPException:
+            return False
+
+    def audit_owner(request: Request) -> Optional[str]:
+        """Admins read the whole audit log; a studio user the calls of their own chats."""
+        return None if principal_of(request)["role"] == "admin" else owner_of(request)
+
     @app.get("/api/approvals", dependencies=[user_dep])
-    async def approvals():
-        return [a.as_dict() for a in engine.approvals.pending.values()]
+    async def approvals(request: Request):
+        return [a.as_dict() for a in engine.approvals.pending.values() if mine(request, a.conversation_id)]
 
     @app.post("/api/approvals/{call_id}", dependencies=[user_dep])
     async def decide(call_id: str, body: DecisionIn, request: Request):
         if body.decision not in ("allow", "allow_session", "allow_always", "deny"):
             raise HTTPException(400, "bad decision")
+        pending = engine.approvals.pending.get(call_id)
+        if pending is not None and not mine(request, pending.conversation_id):
+            return {"ok": False}  # someone else's chat: a studio user cannot answer for it
         if body.decision == "allow_always" and principal_of(request)["role"] != "admin":
             body.decision = "allow_session"
         ok = engine.approvals.resolve(call_id, body.decision)
         return {"ok": ok}
 
     @app.get("/api/audit", dependencies=[user_dep])
-    async def audit(limit: int = 200, conversation_id: str = ""):
-        return store.list_audit(limit=limit, conversation_id=conversation_id)
+    async def audit(request: Request, limit: int = 200, conversation_id: str = ""):
+        return store.list_audit(limit=limit, conversation_id=conversation_id, owner=audit_owner(request))
 
     @app.get("/api/audit/page", dependencies=[user_dep])
-    async def audit_page(limit: int = 50, offset: int = 0, q: str = "", decision: str = "", errors: int = 0, conversation_id: str = ""):
+    async def audit_page(request: Request, limit: int = 50, offset: int = 0, q: str = "", decision: str = "", errors: int = 0, conversation_id: str = ""):
         limit = min(max(limit, 1), 500)
-        items, total = store.query_audit(limit=limit, offset=offset, conversation_id=conversation_id, q=q.strip(), decision=decision, errors=bool(errors))
+        items, total = store.query_audit(limit=limit, offset=offset, conversation_id=conversation_id, q=q.strip(), decision=decision, errors=bool(errors), owner=audit_owner(request))
         return {"items": items, "total": total, "limit": limit, "offset": max(0, offset)}
 
     @app.get("/api/audit/export", dependencies=[user_dep])
-    async def audit_export(q: str = "", decision: str = "", errors: int = 0, conversation_id: str = ""):
+    async def audit_export(request: Request, q: str = "", decision: str = "", errors: int = 0, conversation_id: str = ""):
         """The rows matching the audit filters as CSV (newest first, at most 10,000)."""
-        items, _ = store.query_audit(limit=10000, offset=0, conversation_id=conversation_id, q=q.strip(), decision=decision, errors=bool(errors))
+        items, _ = store.query_audit(limit=10000, offset=0, conversation_id=conversation_id, q=q.strip(), decision=decision, errors=bool(errors), owner=audit_owner(request))
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["time", "conversation_id", "tool", "decision", "is_error", "duration_ms", "arguments", "result_excerpt"])
@@ -1024,7 +1076,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         except PermissionError as e:
             raise HTTPException(403, str(e))
 
-    @app.get("/api/workspace/tree", dependencies=[user_dep])
+    @app.get("/api/workspace/tree", dependencies=[admin_dep])
     async def ws_tree(path: str = "."):
         root = _ws_resolve(path)
         if not root.exists():
@@ -1047,7 +1099,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             raise HTTPException(400, str(e))
         return {"root": str(engine.local.workspace), "path": str(root.relative_to(engine.local.workspace)).replace("\\", "/") if root != engine.local.workspace else ".", "entries": entries}
 
-    @app.get("/api/workspace/file", dependencies=[user_dep])
+    @app.get("/api/workspace/file", dependencies=[admin_dep])
     async def ws_read(path: str):
         p = _ws_resolve(path)
         if not p.is_file():
@@ -1064,7 +1116,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             text = data.decode("cp949", "replace")
         return {"path": path, "content": text, "size": size, "mtime": p.stat().st_mtime}
 
-    @app.get("/api/workspace/download", dependencies=[user_dep])
+    @app.get("/api/workspace/download", dependencies=[admin_dep])
     async def ws_download(path: str):
         """Any file in the workspace as an attachment (binary too): what the agent wrote, what you saved."""
         p = _ws_resolve(path)
@@ -1108,7 +1160,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
         store.event("info", "data", "workspace file saved", {"path": body.path, "bytes": len(body.content), "versioned": versioned}, actor=principal_of(request)["actor"])
         return {"ok": True, "path": body.path, "size": p.stat().st_size, "mtime": p.stat().st_mtime, "versioned": versioned}
 
-    @app.get("/api/workspace/history", dependencies=[user_dep])
+    @app.get("/api/workspace/history", dependencies=[admin_dep])
     async def ws_history(path: str):
         key = _history_key(path)
         out = []
@@ -1120,7 +1172,7 @@ def create_app(engine: Engine, token: str = "") -> FastAPI:
             out.append({"name": b.name, "ts": ts, "size": b.stat().st_size})
         return {"path": path, "versions": out}
 
-    @app.get("/api/workspace/history/file", dependencies=[user_dep])
+    @app.get("/api/workspace/history/file", dependencies=[admin_dep])
     async def ws_history_file(name: str):
         b = (_history_dir() / name).resolve()
         if b.parent != _history_dir().resolve() or not b.exists():

@@ -249,7 +249,7 @@
     shell.append(main);
     app.append(shell);
   }
-  function openDrawer(tab) { S.drawer.open = true; if (tab) S.drawer.tab = tab; if (tab === 'artifacts') S.drawer.artifact = null; S.view = 'chat'; render(); if (S.drawer.tab === 'files') loadTree(S.drawer.path); }
+  function openDrawer(tab) { S.drawer.open = true; if (tab) S.drawer.tab = tab; if (!isAdmin()) S.drawer.tab = 'artifacts'; if (tab === 'artifacts') S.drawer.artifact = null; S.view = 'chat'; render(); if (S.drawer.tab === 'files') loadTree(S.drawer.path); }
   function renderRail() {
     const btn = (name, icon, label, onclick) => el('button', { class: S.view === name || (name === 'settings' && S.view.startsWith('settings')) ? 'active' : '', onclick, 'aria-label': label }, I(icon), el('span', { class: 'tip' }, label));
     const cur = theme.get();
@@ -266,7 +266,7 @@
         el('button', { class: S.drawer.open ? 'active' : '', onclick: () => { if (S.drawer.open) { S.drawer.open = false; render(); } else openDrawer(); }, 'aria-label': T('Workspace') }, I('file'), el('span', { class: 'tip' }, T('Workspace · artifacts') + ' (Ctrl/⌘ J)')),
         el('button', { onclick: () => openPalette(), 'aria-label': T('Search') }, I('search'), el('span', { class: 'tip' }, T('Search & commands') + ' (Ctrl/⌘ K)')),
         el('button', { onclick: () => theme.toggle(), 'aria-label': T('Theme') }, I(cur === 'dark' ? 'moon' : cur === 'warm' ? 'sparkles' : 'sun'), el('span', { class: 'tip' }, T('Theme: {cur} → {next}', { cur: T(cur), next: T(THEMES[(THEMES.indexOf(cur) + 1) % 3]) }))),
-        el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': T('Admin console') }, I('shield'), el('span', { class: 'tip' }, T('Admin console'))),
+        isAdmin() ? el('button', { onclick: () => window.open('/admin', '_blank'), 'aria-label': T('Admin console') }, I('shield'), el('span', { class: 'tip' }, T('Admin console'))) : null,
         el('button', { class: 'lang', onclick: () => setLang(other), 'aria-label': T('Language') }, I('globe', 'sm'), el('span', { class: 'lang-badge' }, i18n.lang === 'ko' ? '한국어' : 'EN'), el('span', { class: 'tip' }, `${T('Language')}: ${LANG_NAME[i18n.lang]} → ${LANG_NAME[other]}`))));
   }
 
@@ -606,9 +606,9 @@
     const modelBtn = el('button', { class: 'btn quiet sm modelbtn' + (unusable(t.provider) ? ' dim' : ''), title: T('Change model') }, el('span', { class: 'truncate' }, t.provider ? `${t.provider.label || t.pid} · ${shortModel(t.model)}` : T('Pick a model')), t.provider ? hdot(t.provider) : null, I('chevron', 'xs'));
     modelBtn.addEventListener('click', () => openModelMenu(pane, modelBtn));
     // permission mode for this chat (research and knowledge need no switch: the model looks things up when a question needs it)
-    const perm = permOf(pane);
+    const perm = isAdmin() ? permOf(pane) : 'readonly';  // a studio user's chats always run read-only (the server enforces it)
     const permBtn = el('button', { class: 'btn quiet sm' + (perm ? ' on' : ''), title: T(PERM[perm][1]) }, I('shield', 'sm'), T(PERM[perm][0]));
-    permBtn.addEventListener('click', () => menu(permBtn, Object.entries(PERM).map(([id, [label, sub]]) => ({ label: T(label), sub: T(sub), id, selected: id === perm })), { onPick: (it) => setPerm(pane, it.id) }));
+    if (isAdmin()) permBtn.addEventListener('click', () => menu(permBtn, Object.entries(PERM).map(([id, [label, sub]]) => ({ label: T(label), sub: T(sub), id, selected: id === perm })), { onPick: (it) => setPerm(pane, it.id) }));
     const styleBtn = el('button', { class: 'btn quiet sm', title: T('Writing style') }, I('wand', 'sm'), t.style && t.style.id !== 'normal' ? t.style.name : T('Style'));
     styleBtn.addEventListener('click', () => menu(styleBtn, (S.st.styles || []).map((s) => ({ label: s.name, sub: s.prompt ? s.prompt.slice(0, 40) + '…' : '', id: s.id, selected: s.id === (t.styleId || 'normal') })), { onPick: (it) => setStyle(pane, it.id) }));
     // how full the context was on the last request (the model's own count), against the window when it is known
@@ -876,10 +876,10 @@
         el('div', { class: 'intro-stages' },
           stage(1, 'fuel', T('Models'), [provs.length ? T(provs.length === 1 ? '1 provider, {up} reachable now.' : '{n} providers, {up} reachable now.', { n: provs.length, up }) : T('No model provider yet.'), t.provider ? T('Default: {model}.', { model: `${t.provider.label || t.pid} · ${shortModel(t.model) || T('No model')}` }) : '', T('OpenAI-compatible servers, Anthropic, Gemini and your own GPU endpoints.')].filter(Boolean).join(' '),
             chips(provs.slice(0, 6).map((p) => el('span', { class: 'chip' }, hdot(p), p.label || p.id)), provs.length - 6)),
-          stage(2, 'payload', T('Tools'), [servers.length ? T(servers.length === 1 ? '{live} of 1 MCP server connected.' : '{live} of {n} MCP servers connected.', { live, n: servers.length }) : T('No MCP server yet.'), T((st.tools || []).length === 1 ? '1 tool in all.' : '{n} tools in all.', { n: (st.tools || []).length }), T('Each call follows your permission mode, and only the tools a task needs are loaded.')].join(' '),
+          stage(2, 'payload', T('Tools'), !isAdmin() ? T('Your chats use the tools the admin allows for studio accounts.') : [servers.length ? T(servers.length === 1 ? '{live} of 1 MCP server connected.' : '{live} of {n} MCP servers connected.', { live, n: servers.length }) : T('No MCP server yet.'), T((st.tools || []).length === 1 ? '1 tool in all.' : '{n} tools in all.', { n: (st.tools || []).length }), T('Each call follows your permission mode, and only the tools a task needs are loaded.')].join(' '),
             chips(servers.slice(0, 6).map((s) => el('span', { class: 'chip' }, sdot(s), s.name)), servers.length - 6)),
           stage(3, 'guidance', T('Harness'), T('One agent loop for every model. It retries failed requests, fits long threads into small context windows, and picks an answer back up when it stops short.')),
-          stage(4, 'pad', T('Workspace'), T('Files, an editor, a terminal and artifacts sit in one panel (Ctrl/⌘ J). Chats, memory and knowledge stay on this machine.'))),
+          stage(4, 'pad', T('Workspace'), isAdmin() ? T('Files, an editor, a terminal and artifacts sit in one panel (Ctrl/⌘ J). Chats, memory and knowledge stay on this machine.') : T('Artifacts from your chats open in a side panel (Ctrl/⌘ J). Only you see your chats.'))),
         el('div', { class: 'intro-foot' }, el('span', { class: 'chip mono' }, 'v' + (st.version || '')), el('span', { class: 'muted tiny' }, T('Ctrl/⌘ K for commands · Ctrl/⌘ B for the sidebar')), el('span', { class: 'spacer' }),
           isAdmin() ? el('button', { class: 'btn', onclick: () => { close(); S.view = 'settings'; S.settingsPage = 'providers'; render(); } }, I('settings', 'sm'), T('Settings')) : null, launch)));
     document.body.append(ov);
@@ -948,6 +948,7 @@
   // ---------------------------------------------------------------- workspace drawer (files · editor · terminal · artifacts)
   const redrawDrawer = () => { const d = $('.drawer'); if (d) d.replaceWith(renderDrawer()); };
   async function loadTree(path) {
+    if (!isAdmin()) return;  // the workspace folder is the admins'; a studio user's drawer holds artifacts only
     S.drawer.loading = true;
     try { const r = await api(`/api/workspace/tree?path=${encodeURIComponent(path || '.')}`); S.drawer.path = r.path; S.drawer.entries = r.entries; S.drawer.root = r.root; } catch (e) { toast(e.message, true); }
     S.drawer.loading = false;
@@ -979,8 +980,9 @@
   function allArtifacts() { for (const p of S.panes) for (const m of p.messages) if (m.role === 'assistant' && m.content) { const tmp = el('div', { html: md(m.content) }); artifactize(tmp, m.id, p.convId); } return Object.values(S.artifacts).sort((a, b) => b.ts - a.ts); }
   function renderDrawer() {
     const D = S.drawer; const root = el('div', { class: 'drawer' });
+    if (!isAdmin()) D.tab = 'artifacts';
     const tab = (id, icon, label) => el('button', { class: 'tab' + (D.tab === id ? ' active' : ''), onclick: () => { D.tab = id; root.replaceWith(renderDrawer()); if (id === 'files' && !D.entries.length) loadTree(D.path); } }, I(icon, 'sm'), label);
-    root.append(el('div', { class: 'dhead' }, tab('files', 'file', T('Files')), tab('editor', 'edit', D.file ? (D.file.content !== D.file.saved ? '● ' : '') + D.file.path.split('/').pop() : T('Editor')), tab('terminal', 'terminal', T('Terminal')), tab('artifacts', 'box', T('Artifacts')), el('span', { class: 'spacer' }), el('button', { class: 'btn quiet icon sm', title: T('Refresh'), onclick: () => loadTree(D.path) }, I('refresh', 'sm')), el('button', { class: 'btn quiet icon sm', title: T('Close'), onclick: () => { D.open = false; render(); } }, I('x', 'sm'))));
+    root.append(el('div', { class: 'dhead' }, isAdmin() ? tab('files', 'file', T('Files')) : null, isAdmin() ? tab('editor', 'edit', D.file ? (D.file.content !== D.file.saved ? '● ' : '') + D.file.path.split('/').pop() : T('Editor')) : null, isAdmin() ? tab('terminal', 'terminal', T('Terminal')) : null, tab('artifacts', 'box', T('Artifacts')), el('span', { class: 'spacer' }), isAdmin() ? el('button', { class: 'btn quiet icon sm', title: T('Refresh'), onclick: () => loadTree(D.path) }, I('refresh', 'sm')) : null, el('button', { class: 'btn quiet icon sm', title: T('Close'), onclick: () => { D.open = false; render(); } }, I('x', 'sm'))));
     const body = el('div', { class: 'dbody' }); root.append(body);
     if (D.tab === 'files') {
       const parts = D.path === '.' ? [] : D.path.split('/');
@@ -1109,6 +1111,7 @@
   }
 
   // ---------------------------------------------------------------- settings
+  const USER_PAGES = ['general'];  // the settings a studio user sees; the rest is the admins'
   const SETTINGS_NAV = [
     { grp: 'Models' }, { id: 'providers', label: 'Model providers', icon: 'cloud' }, { id: 'default', label: 'Defaults & presets', icon: 'box' },
     { grp: 'Tools' }, { id: 'mcp', label: 'MCP servers', icon: 'plug' }, { id: 'tools', label: 'Tools & policy', icon: 'wrench' }, { id: 'knowledge', label: 'Knowledge base', icon: 'box' }, { id: 'memory', label: 'Memory', icon: 'brain' }, { id: 'assistants', label: 'Assistants', icon: 'sparkles' }, { id: 'styles', label: 'Writing styles', icon: 'wand' }, { id: 'prompts', label: 'Prompt library', icon: 'list' }, { id: 'agents', label: 'Agent servers', icon: 'bot' },
@@ -1117,6 +1120,7 @@
   // what each settings page holds, for the settings search (English here, Korean in i18n.js)
   const SETTINGS_KEYS = { providers: 'api key endpoint url custom model openai anthropic gemini ollama vllm test', default: 'default new chat preset quick model', mcp: 'mcp server tool stdio http sse wake restart import', tools: 'policy permission allow ask block shell file web search catalog workspace', knowledge: 'knowledge documents folder index embeddings search', memory: 'memory remember recall', assistants: 'assistant system prompt temperature max tokens tools', styles: 'writing style tone', prompts: 'prompt library template variables slash command', agents: 'agent server bridge device', audit: 'audit log tool calls history export csv', general: 'general language theme appearance text size wide notifications keyboard shortcuts session sign out version' };
   function renderSettings() {
+    if (!isAdmin() && !USER_PAGES.includes(S.settingsPage)) S.settingsPage = 'general';
     const root = el('div', { class: 'settings' });
     const nav = el('div', { class: 'snav' }, el('h2', {}, T('Settings')));
     nav.append(el('button', { onclick: () => { S.view = 'chat'; render(); } }, I('chat', 'sm'), T('Back to chat')));
@@ -1124,7 +1128,7 @@
     const find = el('input', { class: 'input sfind', placeholder: T('Search settings'), value: S.settingsQuery || '' });
     nav.append(find);
     const navItems = [];
-    for (const n of SETTINGS_NAV) { if (n.grp) { const g = el('div', { class: 'grp' }, T(n.grp)); nav.append(g); navItems.push({ g }); continue; } const b = el('button', { class: S.settingsPage === n.id ? 'active' : '', onclick: () => { S.settingsPage = n.id; render(); } }, I(n.icon, 'sm'), T(n.label)); nav.append(b); const label = [n.label, T(n.label)].join(' ').toLowerCase(); navItems.push({ b, label, hay: [label, SETTINGS_KEYS[n.id] || '', T(SETTINGS_KEYS[n.id] || '')].join(' ').toLowerCase() }); }
+    for (const n of isAdmin() ? SETTINGS_NAV : SETTINGS_NAV.filter((x) => USER_PAGES.includes(x.id))) { if (n.grp) { const g = el('div', { class: 'grp' }, T(n.grp)); nav.append(g); navItems.push({ g }); continue; } const b = el('button', { class: S.settingsPage === n.id ? 'active' : '', onclick: () => { S.settingsPage = n.id; render(); } }, I(n.icon, 'sm'), T(n.label)); nav.append(b); const label = [n.label, T(n.label)].join(' ').toLowerCase(); navItems.push({ b, label, hay: [label, SETTINGS_KEYS[n.id] || '', T(SETTINGS_KEYS[n.id] || '')].join(' ').toLowerCase() }); }
     const filterNav = () => { const q = find.value.trim().toLowerCase(); S.settingsQuery = find.value; let group = null, groupHas = false; for (const it of [...navItems, { g: null }]) { if ('g' in it) { if (group) group.style.display = groupHas || !q ? '' : 'none'; group = it.g; groupHas = false; continue; } const hit = !q || q.split(/\s+/).every((w) => it.hay.includes(w)); it.b.style.display = hit ? '' : 'none'; if (hit) groupHas = true; } };
     find.addEventListener('input', filterNav);
     // Enter opens the page whose name matches first, otherwise the first page that mentions the words

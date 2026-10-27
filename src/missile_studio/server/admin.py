@@ -164,6 +164,7 @@ DEFINITIONS: tuple[SettingDef, ...] = (
     SettingDef("login_rate_limit", "int", 10, "access", "Admin login attempts per minute per IP.", min=3, max=100),
     SettingDef("signup_mode", "enum", "invite", "access", "Who can create an account on the sign-in page: off · invite (needs the code below) · open. New accounts are studio users, not admins.", choices=["off", "invite", "open"]),
     SettingDef("signup_invite_code", "str", "", "access", "Code a visitor must enter to sign up while signup_mode is invite. Generated at startup when empty."),
+    SettingDef("user_tools", "enum", "web", "access", "Tools in a studio user's chats: none · web (web search and the clock) · read-only (also the read-only tools of the connected MCP servers). Users never get this machine's shell or files, the memories or the knowledge base, and see only their own chats.", choices=["none", "web", "read-only"]),
     SettingDef("upload_max_mb", "int", 25, "general", "Largest attachment accepted by the chat.", min=1, max=500),
     SettingDef("retention_days", "int", 0, "retention", "Delete chats idle longer than this (0 = keep forever)."),
     SettingDef("event_retention_days", "int", 365, "retention", "Delete admin/system events older than this."),
@@ -589,8 +590,9 @@ def create_admin_router(engine, store, app_state, principal_of) -> APIRouter:
         p = principal_of(request)
         if username == p["actor"]:
             raise HTTPException(400, "cannot delete yourself")
-        if len(store.list_admins()) <= 1:
-            raise HTTPException(400, "keep at least one admin")
+        target = store.get_admin(username)
+        if target and (target.get("role") or "admin") == "admin" and sum(1 for u in store.list_admins() if (u.get("role") or "admin") == "admin") <= 1:
+            raise HTTPException(400, "keep at least one admin")  # studio-user accounts do not count
         ok = store.delete_admin(username)
         store.event("info", "auth", "admin user deleted", {"username": username}, actor=p["actor"])
         return {"ok": ok}

@@ -54,12 +54,13 @@ def test_sandbox_and_roles(client):
     assert client.get("/api/workspace/file?path=../../outside.txt", headers=OWNER).status_code == 403
     assert client.put("/api/workspace/file", json={"path": "../escape.txt", "content": "x"}, headers=OWNER).status_code == 403
     assert client.delete("/api/workspace/file?path=.", headers=OWNER).status_code == 400
-    # a chat-scoped token can browse and read but not write or run
+    # a chat-scoped token is a studio user: the workspace folder is the admins', so no browsing, reading, writing or running
     tok = client.post("/api/admin/tokens", json={"name": "u", "scopes": "chat"}, headers=OWNER).json()["token"]
     H = {"Authorization": "Bearer " + tok}
     client.put("/api/workspace/file", json={"path": "r.txt", "content": "ro"}, headers=OWNER)
-    assert client.get("/api/workspace/tree", headers=H).status_code == 200
-    assert client.get("/api/workspace/file?path=r.txt", headers=H).json()["content"] == "ro"
+    assert client.get("/api/workspace/tree", headers=H).status_code == 403
+    assert client.get("/api/workspace/file?path=r.txt", headers=H).status_code == 403
+    assert client.get("/api/workspace/file?path=r.txt", headers=OWNER).json()["content"] == "ro"
     assert client.put("/api/workspace/file", json={"path": "r.txt", "content": "x"}, headers=H).status_code == 403
     assert client.post("/api/workspace/run", json={"command": "echo hi"}, headers=H).status_code == 403
     assert client.get("/api/workspace/tree").status_code == 401
