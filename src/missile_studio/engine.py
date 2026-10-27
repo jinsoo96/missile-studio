@@ -52,6 +52,21 @@ def _retryable(msg: str) -> bool:
     return bool(_RETRYABLE.search(msg)) and not _FATAL.search(msg)
 
 
+def _read_endpoint(path: str) -> tuple[str, str, str]:
+    """First non-empty line of an endpoint file, "base_url|model|api_key" (model and key optional); empty strings when unreadable."""
+    try:
+        line = next((ln.strip() for ln in Path(path).expanduser().read_text(encoding="utf-8-sig").splitlines() if ln.strip()), "")
+    except OSError:
+        return "", "", ""
+    url, model, key = ([x.strip() for x in line.split("|")] + ["", "", ""])[:3]
+    return url, model, key
+
+
+def _endpoint_model(pc: ProviderConfig) -> str:
+    path = (pc.endpoint_file or "").strip()
+    return _read_endpoint(path)[1] if path else ""
+
+
 # ---------------------------------------------------------------- tools through the prompt (servers without a tool parser)
 TOOL_CALL_OPEN, TOOL_CALL_CLOSE = "<tool_call>", "</tool_call>"
 
@@ -702,12 +717,7 @@ class Engine:
         if seen.get(pc.id) == stamp:
             return False
         seen[pc.id] = stamp
-        try:
-            line = next((ln.strip() for ln in Path(path).expanduser().read_text(encoding="utf-8-sig").splitlines() if ln.strip()), "")
-        except OSError:
-            return False
-        parts = [x.strip() for x in line.split("|")]
-        url, model, key = (parts + ["", "", ""])[:3]
+        url, model, key = _read_endpoint(path)
         changed = False
         if url and url != pc.base_url:
             pc.base_url, changed = url, True
@@ -715,7 +725,7 @@ class Engine:
             pc.api_key, changed = key, True
         if model and model not in (pc.models or []):
             pc.models, changed = [model] + list(pc.models or []), True
-        if model and not pc.default_model:
+        if model and pc.default_model != model:  # the file names the model its server serves (a swapped LLM brings a new name)
             pc.default_model, changed = model, True
         if changed:
             old = self._providers.pop(pc.id, None)
@@ -746,6 +756,9 @@ class Engine:
             m = self.cfg.default.model if self.cfg.default.provider == pid else ""
         if not m:
             m = pc.default_model or (pc.models[0] if pc.models else "")
+        em = _endpoint_model(pc)
+        if em:  # the server behind an endpoint file serves only the model it names; a saved default or chat would ask for the swapped-out one
+            m = em
         if not m:
             raise ProviderError(f"no model selected for provider '{pid}'")
         return pid, m

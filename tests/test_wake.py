@@ -124,3 +124,21 @@ def test_provider_follows_its_endpoint_file(client, tmp_path):
     assert eng.provider("gpu") is second  # unchanged file: same client
     st = json.dumps(client.get("/api/state", headers=H).json())
     assert "pod-b-8000" in st and "key-bbbb-2222" not in st  # the key stays masked
+
+
+def test_swapped_model_in_endpoint_file_wins_over_saved_picks(client, tmp_path):
+    # the same server reloads a different LLM (only that name is served): a saved default or an old chat must not ask for the old one
+    ep = tmp_path / "endpoint.txt"
+    ep.write_text("https://gpu/v1|model-a|k\n", encoding="utf-8")
+    client.post("/api/providers", json=ProviderConfig(id="gpu", kind="openai", label="GPU", base_url="https://old/v1", endpoint_file=str(ep), models=[], default_model="").model_dump(), headers=H)
+    eng = client.app.state.engine
+    eng.cfg.default.provider, eng.cfg.default.model = "gpu", "model-a"
+    assert eng.resolve_target("gpu", "") == ("gpu", "model-a")
+    time.sleep(0.02)
+    ep.write_text("https://gpu/v1|model-b|k\n", encoding="utf-8")
+    eng.provider("gpu")
+    assert eng.cfg.provider("gpu").default_model == "model-b"
+    assert eng.resolve_target("gpu", "") == ("gpu", "model-b")  # saved default still says model-a
+    assert eng.resolve_target("gpu", "model-a") == ("gpu", "model-b")  # an old chat's stored model
+    eng.cfg.provider("gpu").endpoint_file = ""
+    assert eng.resolve_target("gpu", "model-a") == ("gpu", "model-a")  # without an endpoint file the pick stands
