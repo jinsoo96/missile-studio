@@ -143,7 +143,12 @@ def test_lock_sign_out_everywhere_and_own_password(client):
     r = client.post("/api/admin/auth/password", json={"current_password": "longenough1", "new_password": "an-even-longer-one"}, headers=U)
     assert r.status_code == 200
     assert client.get("/api/state").status_code == 200
-    assert client.get("/api/state", cookies={"missile_admin": old}).status_code == 401
+    new = client.cookies.get("missile_admin")
+    client.cookies.clear()  # only the old cookie in the jar (a per-request cookie may go out next to the stored one)
+    client.cookies.set("missile_admin", old)
+    assert client.get("/api/state").status_code == 401
+    client.cookies.clear()
+    client.cookies.set("missile_admin", new)
     assert client.post("/api/admin/auth/login", json={"username": "mina", "password": "longenough1"}).status_code == 401
     rows = {u["username"]: u for u in client.get("/api/admin/users", headers=H).json()}
     assert rows["mina"]["disabled"] == 0
